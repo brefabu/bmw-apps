@@ -34,12 +34,15 @@ const be16 = (v) => [v >> 8, v & 0xFF];
 
 /**
  * A seat module: o.slv / o.shv where the seat is; o.needSession: 2E refused (NRC 7F) until 10 03;
- * o.wiring: -1 runs the motor the other way from what the learned direction says; o.speed counts per ms.
+ * o.wiring: -1 runs the motor the other way from what the learned direction says; o.speed counts per ms;
+ * o.silent: how many motor commands (not STOP) get no answer (timeout); o.silentDoes: those still run the motor;
+ * o.lostReads(n): the n-th position read during a move gets no answer.
  */
 function fakeModule(o) {
     const m = Object.assign({ slv: 33100, shv: 32900, needSession: false, wiring: 1, speed: 0.07, switchHeld: false,
-        stops: ENDS }, o || {});
+        stops: ENDS, silent: 0, silentDoes: false, lostReads: null }, o || {});
     m.motor = { slv: 'stop', shv: 'stop' }; m.ext = false; m.sent = []; m.quiet = false;
+    m.movingReads = 0; m.unseen = [];       // motor states while a position read went unanswered
     m.advance = (ms) => {
         ['slv', 'shv'].forEach((a) => {
             const d = m.motor[a] === 'plus' ? 1 : m.motor[a] === 'minus' ? -1 : 0;
@@ -60,7 +63,13 @@ function fakeModule(o) {
         if (sid === 0x2E) {
             if (m.needSession && !m.ext) return [0x7F, 0x2E, 0x7F];
             const axis = data[2] === 0 ? 'slv' : data[2] === 1 ? 'shv' : null;
-            m.motor[axis] = ['stop', 'plus', 'minus'][data[3]];
+            const action = ['stop', 'plus', 'minus'][data[3]];
+            if (action !== 'stop' && m.silent > 0) {
+                m.silent--;
+                if (m.silentDoes) m.motor[axis] = action;
+                return null;                                              // no answer
+            }
+            m.motor[axis] = action;
             return [0x6E, 0xD7, 0x08];
         }
         if (sid === 0x10) { m.ext = true; return [0x50, 0x03]; }
@@ -71,11 +80,20 @@ function fakeModule(o) {
         get quiet() { return m.quiet; }, set quiet(v) { m.quiet = v; },
         async physical(target, sid, data, timeoutMs, accept, opts) {
             m.sent.push({ target: target, sid: sid, data: data.slice() });
-            // while a move runs, its reads never wait on tries again
-            if (sid === 0x22 && m.motor && (m.motor.slv !== 'stop' || m.motor.shv !== 'stop')) {
-                assert.ok(opts && opts.maxRetries <= 1 && opts.retryBaseMs <= 100 && timeoutMs <= 600, 'a quick read while moving');
+            const running = m.motor.slv !== 'stop' || m.motor.shv !== 'stop';
+            // a PLUS / MINUS is never waited on long (the motor may run meanwhile); a STOP waits longer
+            if (sid === 0x2E) assert.ok(data[3] === 0 ? timeoutMs >= 3000 : timeoutMs <= 1500, 'command waits: ' + data[3] + ' ' + timeoutMs);
+            // while a move runs, its reads wait little on tries again
+            if (sid === 0x22 && running) {
+                assert.ok(opts && opts.maxRetries <= 1 && opts.retryBaseMs <= 100 && timeoutMs <= 1000, 'a quick read while moving');
+            }
+            // a lost position read: noted with whether a motor was running, in the order of everything sent
+            if (sid === 0x22 && data[1] === 0x02 && m.lostReads && m.lostReads(++m.movingReads)) {
+                m.unseen.push({ running: running, at: m.sent.length - 1 });
+                return null;
             }
             const reply = answer(sid, data);
+            if (reply === null) return null;
             assert.ok(!accept || accept(reply), 'the reply matches its request');
             return reply;
         },
@@ -201,6 +219,50 @@ Promise.resolve()
     const r = rig(mod);
     assert.strictEqual(await r.mover.run([['shv', 32473]]), true, r.mover.reason);
     assert.strictEqual(Math.round(mod.shv), 32490, 'fully down that day');
+    onlyAllowed(mod);
+}))
+.then(() => test('a motor command without an answer is sent again, and the move goes on', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900, silent: 1 });
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), true, r.mover.reason);
+    const w = writes(mod);
+    assert.deepStrictEqual(w.slice(0, 2), ['slv minus', 'slv minus'], 'unanswered, then sent again');
+    onlyAllowed(mod);
+}))
+.then(() => test('never answered but obeyed: the position says it was taken, and the move goes on', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900, silent: 1000, silentDoes: true });
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), true, r.mover.reason);
+    assert.ok(Math.abs(mod.slv - 32801) <= Drv.TOLERANCE + 12, String(mod.slv));
+    onlyAllowed(mod);
+}))
+.then(() => test('never answered and nothing moved: stopped, and it says so', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900, silent: 1000 });
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), false);
+    assert.strictEqual(r.mover.reason, 'no answer to the command, and the seat did not move');
+    assert.ok(Math.abs(mod.slv - 33100) < 1);
+    onlyAllowed(mod);
+}))
+.then(() => test('position reads lost during a move: the motor stops until it is read again, then goes on', async () => {
+    const lost = { 3: true, 4: true, 9: true };
+    const mod = fakeModule({ slv: 33100, shv: 32900, lostReads: (n) => !!lost[n] });
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), true, r.mover.reason);
+    assert.ok(mod.unseen.length === 3, 'three reads lost');
+    mod.unseen.filter((u) => u.running).forEach((u) => {
+        const next = mod.sent.slice(u.at + 1).filter((s) => s.sid === 0x2E)[0];
+        assert.ok(next && next.data[3] === 0, 'a lost read while running is followed by STOP');
+    });
+    assert.ok(Math.abs(mod.slv - 32801) <= Drv.TOLERANCE + 12, 'and it still gets there: ' + mod.slv);
+    onlyAllowed(mod);
+}))
+.then(() => test('the position never read again: stopped after a few tries, never moving meanwhile', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900, lostReads: (n) => n >= 3 });
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), false);
+    assert.strictEqual(r.mover.reason, 'position not read');
+    assert.strictEqual(mod.unseen.filter((u) => u.running).length, 1, 'only the first lost read found the motor running');
     onlyAllowed(mod);
 }))
 .then(() => test('stop(): the move ends with STOP', async () => {

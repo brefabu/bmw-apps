@@ -14,9 +14,13 @@
  *
  * A move (SeatMover.moveAxis): one axis at a time toward a Hall counter. The motor's direction comes from the
  * probe's LEARNED direction (seat_link.js, never assumed). It stops - and STOP is always sent - when:
- *   the counter is at the target; it went the wrong way; it stopped moving (an end stop, a blockage); the axis's
+ *   the counter is at the target (STOP early by the seat's speed x a request's time); it went the wrong way; it
+ *   stopped moving (an end stop, a blockage, or a command that was never answered and did nothing); the axis's
  *   time ran out; one of the seat's own switches was touched (they win); guard() said no (not parked, disarmed);
- *   stop() was called; a read or a write failed.
+ *   stop() was called; the module refused the command; the position stayed unread.
+ * Waiting rather than giving up (Fabian, 15.11.2026): an unanswered command is sent again (3 s each), and then
+ * the position tells whether it was taken; a position read that fails STOPS the motor (it never runs unseen)
+ * until the position is read again, then the move goes on.
  * The motor command is sent again every second while the move runs, so a module that drops a tester's command
  * after a while keeps moving only while the app is there.
  */
@@ -31,9 +35,16 @@ const POLL_MS = 200;            // a position read this often while moving (not 
 const RESEND_MS = 1000;         // the motor command again this often
 const START_MS = 900;           // a motor gets this long to start moving (relay, inertia) before "no progress" counts
 const STALL_MS = 700;           // no progress for this long: an end stop or something in the way
-const AXIS_LIMIT_MS = 12000;    // one axis's move ends after this, whatever happens
+const AXIS_LIMIT_MS = 20000;    // one axis's move ends after this, whatever happens (pauses for reads included)
 const TOLERANCE = 6;            // counts: at the target
-const LEAD = 3;                 // counts: STOP this early, for the coasting
+const LEAD = 3;                 // counts: STOP at least this early, for the coasting
+const MAX_LEAD = 40;            // counts: STOP at most this early (the seat's speed x a request's time)
+const MAX_MISSES = 6;           // position reads missed in a row (the motor stopped meanwhile) before the move ends
+const STOP_MS = 3000;           // a STOP's answer is waited for this long, and an unanswered STOP sent again
+const STOP_SENDS = 3;           // up to this many times
+const MOVE_MS = 1500;           // a PLUS / MINUS is sent once and waited for this long: then the position tells
+                                // (a long wait for a command the module obeys silently would let the motor run unseen)
+const MOVE_RETRIES = 2;         // an unanswered PLUS / MINUS after which nothing moved is sent again this often
 const WRONG_WAY = 12;           // counts the wrong way that end a move
 const NEAR = 25;                // counts: stalled this close to the target is there (a target at the end of the
                                 // travel - fully down - may sit a few counts past where the end stop is that day)
@@ -70,13 +81,24 @@ class SeatDrive {
         if (!this.available) return { ok: false, reason: 'no diagnostic link' };
         const data = [0xD7, 0x08, MOTOR[axis], ACTION[action], PWM];
         this.log.info('seat: UDS -> FAS 2E ' + bytes(data) + ' (' + axis + ' ' + action + ')');
-        // a STOP must get through: it waits longer for a busy transport
-        const tries = action === 'stop' ? 5 : 2;
+        // a STOP must get through: it waits longer, for a busy transport and for an answer, and is sent again;
+        // a PLUS / MINUS goes once (the move watches the position and sends it again if nothing moved)
+        const stop = action === 'stop';
+        const tries = stop ? 5 : 2, sends = stop ? STOP_SENDS : 1, waitMs = stop ? STOP_MS : MOVE_MS;
+        const once = async () => {
+            let a = null;
+            for (let i = 0; i < sends; i++) {
+                a = await this._send(0x2E, data, waitMs, tries);
+                if (a.ok || (a.nrc !== null && a.nrc !== undefined)) return a;      // answered: taken or refused
+                if (i + 1 < sends) this.log.warn('seat: ' + axis + ' ' + action + ' unanswered (' + a.reason + '): sent again');
+            }
+            return a;
+        };
         try {
-            let r = await this._send(0x2E, data, null, tries);
+            let r = await once();
             if (!r.ok && (r.nrc === 0x7E || r.nrc === 0x7F) && !this.extended) {
                 const s = await this._session();
-                if (s.ok) r = await this._send(0x2E, data, null, tries);
+                if (s.ok) r = await once();
             }
             if (!r.ok) this.log.warn('seat: ' + axis + ' ' + action + ' not taken: ' + r.reason);
             return r;
@@ -153,41 +175,72 @@ class SeatMover {
         this.axis = axis;
         this.log.info('seat: ' + axis + ' ' + start + ' -> ' + target + ' (' + action + ')');
         const t0 = this.now();
-        let sentAt = t0, best = start, bestAt = t0, misses = 0, polls = 0, ok = false;
+        // goneAt: when the motor was (re)started - "no progress" counts from START_MS after it
+        let sentAt = t0, goneAt = t0, best = start, bestAt = t0, misses = 0, polls = 0, ok = false;
+        let paused = false, answered = true, last = null, speed = 0, retries = MOVE_RETRIES;
         this.progress = { axis: axis, start: start, now: start, target: target, action: action, sent: null };
-        try {
+        // a command: refused (NRC) ends the move; unanswered (timeout) goes on watching the position, which tells
+        const send = async () => {
             const w = await this.drive.motor(axis, action);
-            this.progress.sent = !!w.ok;
-            if (!w.ok) { this.reason = 'command not taken: ' + w.reason; return false; }
+            if (w.ok) { answered = true; this.progress.sent = true; return true; }
+            if (w.nrc !== null && w.nrc !== undefined) { this.reason = 'command refused: ' + w.reason; return false; }
+            answered = false; this.progress.sent = null;
+            this.log.warn('seat: ' + axis + ' ' + action + ' unanswered (' + w.reason + '): watching the position');
+            return true;
+        };
+        try {
+            if (!(await send())) return false;
             for (;;) {
                 await this.wait(POLL_MS);
-                const now = this.now();
                 if (this.aborted) return false;
                 if (!this.guard()) { this.reason = 'not allowed now'; return false; }
+                const asked = this.now();
                 const h = await this._read();
+                const now = this.now(), latency = now - asked;
                 const v = h && h[axis];
                 if (v === null || v === undefined) {
-                    if (++misses >= 2) { this.reason = 'position not read'; return false; }
+                    // never run unseen: the motor stops until the position is read again, then goes on
+                    misses++;
+                    if (!paused) { paused = true; await this.drive.motor(axis, 'stop'); this.log.warn('seat: ' + axis + ' position not read: paused'); }
+                    if (misses >= MAX_MISSES) { this.reason = 'position not read'; return false; }
                     continue;
                 }
                 misses = 0;
                 this.progress.now = v;
+                if (last && now > last.t) speed = Math.abs(v - last.v) / (now - last.t);
+                last = { v: v, t: now };
+                if (up ? v < start - WRONG_WAY : v > start + WRONG_WAY) { this.reason = 'went the wrong way'; return false; }
+                // STOP early by what the seat covers while the STOP is on its way (about one request), never late
+                const lead = Math.max(LEAD, Math.min(MAX_LEAD, Math.round(speed * latency)));
+                if (up ? v >= target - lead : v <= target + lead) { ok = true; return true; }
+                if (paused) {
+                    paused = false;
+                    if (!(await send())) return false;
+                    sentAt = goneAt = bestAt = this.now(); best = v;
+                    continue;
+                }
                 if ((++polls) % 2 === 0) {
                     const s = await this.seat.read(DID.SWITCHES, null, true);
                     if (s.ok && parseSwitches(s.data).pressed) { this.reason = 'a seat switch was touched'; return false; }
                 }
-                if (up ? v < start - WRONG_WAY : v > start + WRONG_WAY) { this.reason = 'went the wrong way'; return false; }
-                if (up ? v >= target - LEAD : v <= target + LEAD) { ok = true; return true; }
                 if (up ? v > best + 1 : v < best - 1) { best = v; bestAt = now; }
-                if (now - t0 > START_MS && now - bestAt > STALL_MS) {
+                if (now - goneAt > START_MS && now - bestAt > STALL_MS) {
                     if (Math.abs(target - v) <= NEAR) { ok = true; return true; }
-                    this.reason = 'no progress (end stop?)'; return false;
+                    if (!answered && retries > 0) {
+                        // unanswered and nothing moved: the command again, and watch again
+                        retries--;
+                        this.log.warn('seat: ' + axis + ' did not move on an unanswered ' + action + ': sent again');
+                        if (!(await send())) return false;
+                        sentAt = goneAt = bestAt = this.now(); best = v;
+                        continue;
+                    }
+                    this.reason = answered ? 'no progress (end stop?)' : 'no answer to the command, and the seat did not move';
+                    return false;
                 }
                 if (now - t0 > AXIS_LIMIT_MS) { this.reason = 'time limit'; return false; }
                 if (now - sentAt >= RESEND_MS) {
                     sentAt = now;
-                    const again = await this.drive.motor(axis, action);
-                    if (!again.ok) { this.reason = 'command not taken: ' + again.reason; return false; }
+                    if (!(await send())) return false;
                 }
             }
         } finally {
