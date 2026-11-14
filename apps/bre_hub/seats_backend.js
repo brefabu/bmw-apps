@@ -28,7 +28,7 @@ const JOG_HOLD_MS = 350;        // a jog stops when it is not repeated within th
 const TICK_MS = 50;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
-const REFRESH_MS = 6000;        // a backend's fresh position read: given up after this (the position then counts as unknown)
+const REFRESH_MS = 12000;       // a backend's fresh position read: given up after this (the position then counts as unknown)
 
 /** p (a promise or a value), settled within ms whatever it does; never rejects. */
 function withTimeout(p, ms) {

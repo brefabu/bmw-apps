@@ -2,7 +2,7 @@
   "id": "bre_hub",
   "title": "My car",
   "description": "My car (BRE Hub): your car on one page, in the style of iDrive 7. Seat Easy Access: the driver's seat back and down when the car is switched off, back when it starts (parked only). The exhaust flap: open, closed, auto or by the driving mode, held against the engine controller's timeout. Both ship disarmed",
-  "version": "0.3.6",
+  "version": "0.4.0",
   "vendor": "brefabu",
   "loggingId": "BRE1",
   "iconGlyph": "BRE",

@@ -249,6 +249,21 @@ app.seatProbe.state = 'found';
 app.seatProbe.hallError = 'timeout';                     // a position read failed: the reason under the list
 drawPage(true, D0);
 app.seatProbe.hallError = null;
+// the seat speed test: only armed (and parked); its states and results under the list
+let testState = { testing: false, tested: null }, testRuns = 0;
+app.seatTest = { run() { testRuns++; }, state: () => testState };
+cv = drawPage(true, D0);
+assert.ok(cv.targets.indexOf('probe-speed') < 0, 'not armed: the speed test cannot be started');
+const modeBefore = settingsValues.easyEntry;
+settingsValues.easyEntry = 'armed';
+drawPage(true, D0, 'probe-speed');
+assert.strictEqual(testRuns, 1, 'armed and parked: the test starts');
+app.seatProbe.speeds = { slv: { plus: 0.07, minus: 0.068 }, shv: { plus: 0.05, minus: 0.052 } };
+testState = { testing: true, tested: null }; drawPage(true, D0);
+testState = { testing: false, tested: { ok: true } }; drawPage(true, D0);
+testState = { testing: false, tested: { ok: false, text: 'the seat did not move (slv minus)' } }; drawPage(true, D0);
+settingsValues.easyEntry = modeBefore;
+delete app.seatTest;
 drawPage(true, D0, 'probe-back');
 assert.strictEqual(home.ui.view, 'seat');
 // armed (the real seat): the list says so, a stop shows why; turning it off from the page never arms it again

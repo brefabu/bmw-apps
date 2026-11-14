@@ -149,19 +149,36 @@ function rows(app, parked) {
         const sw = p && p.switches;
         // where Seat Easy Access would take the seat from here, as the module's counters (nothing moves)
         const exit = p && p.exitCounts ? p.exitCounts(app.easyEntry.offset) : null;
+        // the speed test (seat_drive.js): moves the seat a little each way; armed and parked only
+        const st = app.seatTest ? app.seatTest.state() : { testing: false, tested: null };
+        const perSecond = (a) => {
+            const s = p && p.speeds && p.speeds[a];
+            const vs = s ? ['plus', 'minus'].map((k) => s[k]).filter((v) => typeof v === 'number') : [];
+            return vs.length ? Math.round(1000 * vs.reduce((x, y) => x + y, 0) / vs.length) : null;
+        };
+        const fs = perSecond('slv'), hs = perSecond('shv');
+        const canTest = app.settings.get('easyEntry') === 'armed' && parked && !st.testing;
+        const speedRow = { key: 'probe-speed', label: T('probe.speed'), dim: !canTest,
+            value: st.testing ? T('probe.measuring') : fs !== null && hs !== null ? T('probe.speedValue', { fore: fs, height: hs }) : T('probe.measure'),
+            run: () => { if (canTest && app.seatTest) app.seatTest.run(); } };
+        const testFoot = st.tested ? (st.tested.ok ? { text: T('probe.speedDone', { fore: fs, height: hs }) }
+            : { text: T('probe.speedFail', { reason: st.tested.text || '-' }), warn: true })
+            : app.settings.get('easyEntry') !== 'armed' ? { text: T('probe.armFirst') } : null;
         return {
             list: [
                 { key: 'probe-back', icon: 'back', label: T('seats.module'), run: () => show(app, 'seat', 'seat-module') },
                 { key: 'probe-module', label: T('probe.module'), value: probeState(p) },
-                axis('slv'), axis('shv'), axis('lnv'),
+                axis('slv'), axis('shv'), speedRow,
                 { key: 'probe-buttons', label: T('probe.buttons'), value: !sw ? '-' : T(sw.pressed ? 'probe.pressed' : 'probe.released'),
                     color: sw && sw.pressed ? 'warn' : null },
                 { key: 'probe-reset', label: T('probe.resetTravel'), dim: !p, run: () => { if (p) p.resetTravel(); } },
             ],
             foot: p && p.state === 'none' ? { text: T('probe.why', { reason: p.reason || '-' }), warn: true }
+                : st.testing ? { text: T('probe.measuring') }
+                : st.tested ? testFoot
                 : p && p.hallError ? { text: T('probe.hallFail', { reason: p.hallError }), warn: true }
-                : exit ?{ text: T('probe.exit', { pct: Math.round(100 * app.easyEntry.offset), fore: exit.slv, height: exit.shv }) }
-                : { text: T('probe.foot') },
+                : exit ? { text: T('probe.exit', { pct: Math.round(100 * app.easyEntry.offset), fore: exit.slv, height: exit.shv }) }
+                : testFoot || { text: T('probe.foot') },
         };
     }
     if (ui.view === 'exhaust') {

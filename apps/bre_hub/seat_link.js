@@ -51,6 +51,7 @@ const STALE_MS = 5000;           // the last position read stands this long when
 const MIN_STEP = 3;              // counts a poll must move for a direction sample
 const VOTES = 2;                 // agreeing samples (and twice the disagreeing ones) to learn a direction
 const HALL_MIN = 8192, HALL_MAX = 57344;
+const SPEED_MIN = 0.002, SPEED_MAX = 1;      // counts per ms a seat speed may have (2 .. 1000 counts per second)
 const TRAVEL_FILE = 'bre_seat_travel.json';
 
 const u16 = (d, at) => (d.length >= at + 2 ? (d[at] << 8) | d[at + 1] : null);
@@ -150,6 +151,7 @@ class SeatProbe {
         const saved = this._load();
         this.travel = saved.travel;     // { slv: [min, max], ... }: the lowest and highest counter seen
         this.rises = saved.rises;       // { slv: 'plus' | 'minus' }: the motor direction that makes the counter rise
+        this.speeds = saved.speeds;     // { slv: { plus, minus }, ... }: counts per millisecond (seat_drive.js)
         this._votes = {}; this._prev = null; this._tick = null;
         this._saveAt = 0; this._dirty = false; this._last = '';
     }
@@ -158,7 +160,8 @@ class SeatProbe {
     get busy() { return !!this._tick; }
 
     _load() {
-        const out = { travel: {}, rises: {} };
+        const out = { travel: {}, rises: {}, speeds: {} };
+        const okSpeed = (v) => typeof v === 'number' && v > SPEED_MIN && v < SPEED_MAX;
         try {
             const t = JSON.parse(fs.readFileSync(this.file, 'utf8'));
             Object.keys(AXES).forEach((a) => {
@@ -166,20 +169,63 @@ class SeatProbe {
                 if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && v >= HALL_MIN && v <= HALL_MAX)) out.travel[a] = [r[0], r[1]];
                 const d = t && t.rises && t.rises[a];
                 if (AXES[a].plus && (d === 'plus' || d === 'minus')) out.rises[a] = d;
+                const s = t && t.speeds && t.speeds[a];
+                if (AXES[a].plus && s && (okSpeed(s.plus) || okSpeed(s.minus))) {
+                    out.speeds[a] = {};
+                    if (okSpeed(s.plus)) out.speeds[a].plus = s.plus;
+                    if (okSpeed(s.minus)) out.speeds[a].minus = s.minus;
+                }
             });
         } catch (e) { /* none yet */ }
         return out;
     }
 
-    _save() {
-        if (!this.file || !this._dirty || Date.now() - this._saveAt < 2000) return;
+    _save(now) {
+        if (!this.file || !this._dirty || (!now && Date.now() - this._saveAt < 2000)) return;
         this._dirty = false; this._saveAt = Date.now();
-        const doc = Object.assign({}, this.travel, { rises: this.rises });
+        const doc = Object.assign({}, this.travel, { rises: this.rises, speeds: this.speeds });
         try { fs.writeFileSync(this.file, JSON.stringify(doc)); } catch (e) { this.log.warn('seat travel: ' + e); }
     }
 
-    /** Forget the measured ends and the learned directions (to measure them again). */
-    resetTravel() { this.travel = {}; this.rises = {}; this._votes = {}; this._dirty = true; this._saveAt = 0; this._save(); }
+    /** Forget the measured ends, the learned directions and the speeds (to measure them again). */
+    resetTravel() {
+        this.travel = {}; this.rises = {}; this.speeds = {}; this._votes = {};
+        this._dirty = true; this._saveAt = 0; this._save();
+    }
+
+    /** The axis's speed for a motor action, counts per millisecond, or null (not measured). */
+    speed(axis, action) {
+        const s = this.speeds[axis];
+        return s && typeof s[action] === 'number' ? s[action] : null;
+    }
+
+    /** A measured speed (the speed test): kept as it is. */
+    setSpeed(axis, action, v) {
+        if (!AXES[axis] || !AXES[axis].plus || !(v > SPEED_MIN && v < SPEED_MAX)) return;
+        (this.speeds[axis] || (this.speeds[axis] = {}))[action] = v;
+        this._dirty = true; this._save(true);
+    }
+
+    /** A speed seen in a move: blended into the kept one (a single pulse is a noisy measure). */
+    learnSpeed(axis, action, v) {
+        const old = this.speed(axis, action);
+        this.setSpeed(axis, action, old ? old + (v - old) * 0.3 : v);
+    }
+
+    /** The direction found by the speed test (when none was learned). */
+    setDirection(axis, rises) {
+        if (!AXES[axis] || !AXES[axis].plus || (rises !== 'plus' && rises !== 'minus')) return;
+        this.rises[axis] = rises; this._votes[axis] = { plus: 0, minus: 0 };
+        this._dirty = true; this._save(true);
+        this.log.info('seat probe: ' + axis + ' counter rises toward the ' + this.risesToward(axis) + ' (speed test)');
+    }
+
+    /** A direction a move contradicted: dropped, to be learned again (no share, no target meanwhile). */
+    forgetDirection(axis) {
+        delete this.rises[axis]; delete this._votes[axis];
+        this._dirty = true; this._save(true);
+        this.log.warn('seat probe: ' + axis + ' direction dropped');
+    }
 
     /** Where a rising counter takes the seat on this axis ('front' | 'back' | 'up' | 'down'), or null (not learned). */
     risesToward(a) {

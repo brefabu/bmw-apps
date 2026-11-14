@@ -65,7 +65,15 @@ mgu.run({
         const mover = new SeatMover({ probe: seatProbe, seatLink: seatLink, drive: new SeatDrive(link, log), log: log,
             guard: () => armed() && parkedStrict() });
         const realSeats = new RealBackend({ probe: seatProbe, mover: mover, log: log });
-        realSeats.refresh = () => seatProbe.tick();
+        // a fresh position, patiently: right after the car is switched off the link is often busy (G30, 15.11.2026)
+        realSeats.refresh = async () => {
+            const asked = Date.now();
+            for (;;) {
+                await seatProbe.tick();
+                if (seatProbe.hallAt >= asked || Date.now() - asked > 10000) return;
+                await new Promise((r) => setTimeout(r, 1000));
+            }
+        };
         const demoSeats = seatsLib.createBackend('demo', log);
         // the backend the setting picks, asked each time (the setting can change while the app runs)
         const seats = {
@@ -90,6 +98,15 @@ mgu.run({
 
         const app = {
             ctx, settings, log, car, parked, seats, positions, easyEntry, exhaust, ident, seatProbe,
+            /** The seat speed test (seat_drive.js): run() armed and parked only; state() for the page. */
+            seatTest: {
+                run() {
+                    if (!armed() || !parkedStrict() || mover.busy) return;
+                    mover.measureSpeed().then(repaint, (e) => log.error('seat speed test', e));
+                    repaint();
+                },
+                state() { return { testing: mover.testing, tested: mover.tested }; },
+            },
             /** The last requests to the car, newest first (dme_link.js pace: docs/07, rule 7). */
             journal() { return (link.diag && link.diag.journal) || []; },
             /** The page target the controller is on (its key), or null. */
