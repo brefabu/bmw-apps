@@ -1,0 +1,21 @@
+# BMW's SDK, extracted from your own head unit: never in git (docs/02)
+oap-sdk/
+x_call/
+x_call@*.tgz
+*.mgu
+
+# build output, previews, the unit's own catalogs and anything that identifies a car
+dist/
+preview/
+out/
+reference/
+kit/renderd/build/
+
+node_modules/
+.DS_Store
+
+# Python bytecode (kit/tools/build.py)
+__pycache__/
+
+# Docs and stuff
+docs/

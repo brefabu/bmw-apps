@@ -1,0 +1,69 @@
+{
+  "id": "bre_hub",
+  "title": "My car",
+  "description": "My car (BRE Hub): your car on one page, in the style of iDrive 7. Seat Easy Access (demo) and the exhaust flap: open, closed, auto or by the driving mode, held against the engine controller's timeout. The exhaust flap ships disarmed (simulated)",
+  "version": "0.2.0",
+  "vendor": "brefabu",
+  "loggingId": "BRE1",
+  "iconGlyph": "BRE",
+  "mguHmi": ["ID7"],
+  "signals": {
+    "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
+      "_instances": "SystemFunctionsInternalTasuInst1",
+      "_methods": ["sendTasuRequest"],
+      "_broadcasts": ["sendTasuResponse"]
+    },
+    "de.bmw.infotainment.vehicle.CDS": {
+      "statusEngineSpeed2": "rs"
+    },
+    "de.bmw.infotainment.vehicle.Vehicle2": {
+      "statusCarSpeed2": "rs"
+    },
+    "de.bmw.infotainment.drivingexcitement.FES": {
+      "statusFESVehicleDynamicSwitchHMI": "rs"
+    }
+  },
+  "screens": [
+    {
+      "name": "MAIN",
+      "kind": "canvas",
+      "title": "My car",
+      "buttons": [
+        ["BTN_SEAT", "Seat Easy Access"],
+        ["BTN_EXHAUST", "Exhaust flap"],
+        ["BTN_SETTINGS", "Settings"]
+      ]
+    }
+  ],
+  "settings": [
+    { "key": "language", "label": "Language", "type": "choice", "default": "en",
+      "options": [["en", "English"], ["ro", "Romana"]] },
+    { "key": "theme", "label": "Look", "type": "choice", "default": "bre_idrive",
+      "options": [["bre_idrive", "iDrive 7"], ["bre_graphite", "Graphite"], ["bre_sand", "Sand"]] },
+    { "key": "carModel", "label": "Car", "type": "choice", "default": "auto",
+      "options": [["auto", "Auto (read from the car)"], ["g30", "5 Series Sedan (G30)"]] },
+    { "key": "paint", "label": "Paint", "type": "choice", "default": "mineral",
+      "options": [["mineral", "Mineral Grey"], ["sapphire", "Black Sapphire"], ["alpine", "Alpine White"],
+        ["phytonic", "Phytonic Blue"], ["glacier", "Glacier Silver"]] },
+    { "key": "easyEntry", "label": "Seat Easy Access", "type": "choice", "default": "demo",
+      "options": [["off", "Off"], ["demo", "On (demo: the real seat does not move)"]] },
+    { "key": "seatOffset", "label": "Seat: move back to", "type": "choice", "default": "75",
+      "options": [["50", "50 %"], ["55", "55 %"], ["60", "60 %"], ["65", "65 %"], ["70", "70 %"], ["75", "75 %"],
+        ["80", "80 %"], ["85", "85 %"], ["90", "90 %"], ["95", "95 %"], ["100", "100 %"]] },
+    { "key": "exhaustArm", "label": "Exhaust flap", "type": "choice", "default": "off",
+      "options": [["off", "Disarmed (simulated, safe)"], ["on", "Armed (moves the real flap)"]] },
+    { "key": "exhaustHold", "label": "Exhaust: hold Open / Closed", "type": "choice", "default": "on",
+      "options": [["on", "On (sent again every 15 s)"], ["off", "Off (the car takes over after ~20 s)"]] },
+    { "key": "exhaustCloseLimit", "label": "Exhaust: Closed, hand back above", "type": "choice", "default": "4000",
+      "options": [["2500", "2,500 rpm"], ["3000", "3,000 rpm"], ["3500", "3,500 rpm"], ["4000", "4,000 rpm"],
+        ["4500", "4,500 rpm"], ["5000", "5,000 rpm"], ["5500", "5,500 rpm"], ["off", "Never (not recommended)"]] },
+    { "key": "exhaustSport", "label": "Exhaust in Sport", "type": "choice", "default": "open",
+      "options": [["open", "Open"], ["closed", "Closed"], ["oem", "Auto"]] },
+    { "key": "exhaustComfort", "label": "Exhaust in Comfort", "type": "choice", "default": "oem",
+      "options": [["open", "Open"], ["closed", "Closed"], ["oem", "Auto"]] },
+    { "key": "exhaustEco", "label": "Exhaust in Eco Pro", "type": "choice", "default": "closed",
+      "options": [["open", "Open"], ["closed", "Closed"], ["oem", "Auto"]] },
+    { "key": "exhaustDrive", "label": "Exhaust follows the driving mode", "type": "choice", "default": "off",
+      "options": [["off", "Off"], ["on", "On"]], "hidden": true }
+  ]
+}

@@ -1,0 +1,11 @@
+# Live emulator in a container: docker compose up --build   ->  http://localhost:8077
+# Another app: docker compose run --rm --service-ports emu <app id>
+services:
+  emu:
+    build: tools/emu-container
+    init: true                      # signals reach node (Ctrl+C, docker compose down)
+    volumes:
+      - .:/work:ro                  # mirrored into /app; a save under apps/<id>/ rebuilds and restarts the app
+    ports:
+      - "127.0.0.1:8077:8078"       # this computer only, as emu.js intends
+    command: ["bre_hub"]
