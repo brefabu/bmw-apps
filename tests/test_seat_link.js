@@ -270,6 +270,20 @@ Promise.resolve()
     const t = Date.now();
     await diag.physical(0x6D, 0x2E, [0xD7, 0x08, 0, 0, 100], 1500, null, { urgent: true });
     assert.ok(Date.now() - t < COOL_MS / 2, 'the STOP did not wait the pause');
+    // the journal (docs/07, rule 7): each request, newest first, and what came back
+    const j = diag.journal;
+    assert.strictEqual(j[0].unit, 'FAS');
+    assert.strictEqual(j[0].req, '2E D708 00 00 64');
+    assert.strictEqual(j[0].result, 'ok');
+    assert.strictEqual(j[1].result, 'transport refused');
+    assert.ok(j.length >= 7 && j.length <= 40);
+    const silent = pace({ async physical() { return null; } });
+    await silent.physical(0x12, 0x22, [0xF1, 0x90]);
+    assert.deepStrictEqual([silent.journal[0].unit, silent.journal[0].req, silent.journal[0].result], ['DME', '22 F190', 'no answer'],
+        'no reply kept for the VIN: only that it was asked and not answered');
+    const busy = pace({ async physical() { throw new Error('transport refused: APP_REQUEST_TEMPORARILY_NOT_ACCEPTED'); } });
+    await busy.physical(0x6D, 0x22, [0xD7, 0x02]).catch(() => {});
+    assert.strictEqual(busy.journal[0].result, 'busy');
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');

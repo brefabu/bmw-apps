@@ -48,12 +48,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function pace(diag) {
     const raw = diag.physical.bind(diag);
     let chain = Promise.resolve(), next = 0;
+    diag.journal = [];
     diag.physical = function () {
         const args = arguments, urgent = !!(args[5] && args[5].urgent);
+        let t0 = 0;
         const run = () => sleep(urgent ? 0 : Math.max(0, next - Date.now()))
-            .then(() => raw.apply(null, args))
-            .then((r) => { next = Date.now() + (r ? GAP_MS : COOL_MS); return r; },
-                (e) => { next = Date.now() + COOL_MS; throw e; });
+            .then(() => { t0 = Date.now(); return raw.apply(null, args); })
+            .then((r) => { next = Date.now() + (r ? GAP_MS : COOL_MS); note(diag, args, r, null, t0); return r; },
+                (e) => { next = Date.now() + COOL_MS; note(diag, args, null, e, t0); throw e; });
         const p = chain.then(run, run);
         chain = p.catch(() => {});
         return p;
@@ -61,6 +63,29 @@ function pace(diag) {
     diag.busyMs = 100;
     diag.busyLog = false;
     return diag;
+}
+
+const JOURNAL = 40;             // requests kept for the page's "Last requests" (docs/07, rule 7); never written to disk
+const UNITS = { 0x12: 'DME', 0x6D: 'FAS' };
+
+/**
+ * One request in the journal: { t, unit, req ('22 D702', '2E D708 00 02 64'), result ('ok', 'no answer',
+ * 'NRC 31 out of range', 'busy', or the transport's error), ms }. Newest first. The VIN's reply is never kept:
+ * only the request and whether it was answered.
+ */
+function note(diag, args, reply, err, t0) {
+    const target = args[0], sid = args[1], data = Array.isArray(args[2]) ? args[2] : [];
+    const req = hex(sid) + ' ' + (sid === 0x22 || sid === 0x2E ? data.slice(0, 2).map((x) => hex(x)).join('') + (data.length > 2 ? ' ' : '') +
+        data.slice(2).map((x) => hex(x)).join(' ') : data.map((x) => hex(x)).join(' '));
+    let result;
+    if (err) {
+        const m = String(err && err.message || err);
+        result = /TEMPORARILY|BUSY/i.test(m) ? 'busy' : m.replace(/^transport refused: /, '').slice(0, 32);
+    } else if (!reply || !reply.length) result = 'no answer';
+    else if (reply[0] === 0x7F) result = 'NRC ' + hex(reply[2]) + (NRC[reply[2]] ? ' ' + NRC[reply[2]] : '');
+    else result = 'ok';
+    diag.journal.unshift({ t: Date.now(), unit: UNITS[target] || hex(target), req: req.trim(), result: result, ms: t0 ? Date.now() - t0 : 0 });
+    if (diag.journal.length > JOURNAL) diag.journal.length = JOURNAL;
 }
 
 class DmeLink {

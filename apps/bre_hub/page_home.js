@@ -22,6 +22,7 @@ const { T } = require('./bre_text');
 
 // the list starts PANEL_X in: the HMI's back column covers the page's first few units (kit/runtime/display.js)
 const PANEL_X = 12, PANEL_W = 500, GRIP_W = 22, ROW_H = 62;
+const LOG_LINES = 12, LOG_LINE_H = 29;                                 // the "Last requests" list
 const OFFSETS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100];      // the "seatOffset" setting's values
 const FLAPS = ['open', 'closed', 'oem'];                             // a driving mode group's setting, in press order
 const FLAP_TEXT = { OPEN: 'ex.open', CLOSED: 'ex.closed', OEM: 'ex.auto', DRIVE: 'ex.drive' };
@@ -109,8 +110,22 @@ function rows(app, parked) {
                     dim: !on || moving, run: () => { if (ee.savePosition) ee.savePosition().catch(() => {}); } },
                 { key: 'seat-module', label: T('seats.module'), value: probeState(app.seatProbe), next: true,
                     run: () => { show(app, 'seatinfo', 'probe-back'); if (app.seatProbe) app.seatProbe.tick().catch(() => {}); } },
+                { key: 'seat-log', label: T('seats.log'), next: true, run: () => show(app, 'seatlog', 'log-back') },
             ],
             foot: !parked ? { text: T('seats.parkedOnly'), warn: true } : !on ? null : seatFoot(app, ee, mode),
+        };
+    }
+    if (ui.view === 'seatlog') {
+        // the last requests to the car and what came back, newest first (docs/07, rule 7)
+        const j = app.journal ? app.journal() : [];
+        const two = (n) => (n < 10 ? '0' : '') + n;
+        const hms = (t) => { const d = new Date(t); return two(d.getHours()) + ':' + two(d.getMinutes()) + ':' + two(d.getSeconds()); };
+        return {
+            list: [{ key: 'log-back', icon: 'back', label: T('seats.log'), run: () => show(app, 'seat', 'seat-log') }],
+            lines: j.length ? j.slice(0, LOG_LINES).map((e) => ({
+                text: hms(e.t) + '  ' + e.unit + ' ' + e.req + ': ' + e.result + ' (' + e.ms + ' ms)', warn: e.result !== 'ok',
+            })) : [{ text: T('log.empty') }],
+            foot: null,
         };
     }
     if (ui.view === 'seatinfo') {
@@ -221,6 +236,12 @@ function drawList(cv, t, app, x, y, w, h, parked) {
             D.button(cv, t, bx + bw + D.SPACE.xs, ry + 8, bw, ROW_H - 16, '+', row.more, { key: row.key.replace('less', 'more') });
         } else D.listRow(cv, t, r, o);
         ry += ROW_H;
+    });
+    // plain lines under the rows (the request journal): caption size, as many as fit
+    (m.lines || []).forEach((ln) => {
+        if (ry + LOG_LINE_H > y + h - 4) return;
+        ry += LOG_LINE_H;
+        cv.text(ln.text, x + D.SPACE.m, ry - 8, D.TYPE.caption.size, ln.warn ? t.warn : t.dim, { font: D.TYPE.caption.font });
     });
     if (m.foot && ry + 40 < y + h) {
         cv.text(m.foot.text, x + D.SPACE.m, ry + 34, D.TYPE.caption.size, m.foot.warn ? t.warn : t.dim, { font: D.TYPE.caption.font });

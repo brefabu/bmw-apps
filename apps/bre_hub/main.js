@@ -90,6 +90,8 @@ mgu.run({
 
         const app = {
             ctx, settings, log, car, parked, seats, positions, easyEntry, exhaust, ident, seatProbe,
+            /** The last requests to the car, newest first (dme_link.js pace: docs/07, rule 7). */
+            journal() { return (link.diag && link.diag.journal) || []; },
             /** The page target the controller is on (its key), or null. */
             focusKey() {
                 const k = display && display.focusKey;

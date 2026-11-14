@@ -108,6 +108,13 @@ const app = {
     focusKey: () => focused, focus: (k) => { focused = k; }, openSettings: () => {},
 };
 app.easyEntry = new S.EasyEntry(seats, app.positions, quiet);
+// the request journal (dme_link.js pace): a few of what the car answered
+app.journal = () => [
+    { t: Date.now(), unit: 'FAS', req: '22 D702', result: 'ok', ms: 180 },
+    { t: Date.now() - 2000, unit: 'FAS', req: '2E D708 00 02 64', result: 'no answer', ms: 1500 },
+    { t: Date.now() - 4000, unit: 'FAS', req: '10 03', result: 'NRC 22 conditions not correct', ms: 90 },
+    { t: Date.now() - 6000, unit: 'FAS', req: '22 D712', result: 'busy', ms: 1000 },
+];
 // the seat probe as seat_link.js leaves it: a module found, the seat moving back, its switch held
 app.seatProbe = {
     state: 'found', reason: null, config: { slv: 2, shv: 2, lnv: 1 }, init: { initialised: true },
@@ -150,7 +157,7 @@ let n = 0;
                 [false, true].forEach((mv) => {
                     moving = mv;
                     Object.keys(datas).forEach((k) => {
-                        ['main', 'seat', 'seatinfo', 'exhaust', 'modes', 'paint'].forEach((view) => {
+                        ['main', 'seat', 'seatinfo', 'seatlog', 'exhaust', 'modes', 'paint'].forEach((view) => {
                             home.ui.view = view; home.ui.open = true; home.ui.k = 1;
                             try { drawPage(own, datas[k]); } catch (e) { e.message = view + ' / ' + k + ' / ' + lang + ': ' + e.message; throw e; }
                             n++;
@@ -216,6 +223,19 @@ assert.strictEqual(app.easyEntry.state, 'IDLE');
 // position 1 can be saved from the seat list
 cv = drawPage(true, D0);
 assert.ok(cv.targets.indexOf('seat-save') >= 0, 'Save as position 1 is a target');
+// the request journal: opened from the seat list, back again
+drawPage(true, D0, 'seat-log');
+assert.strictEqual(home.ui.view, 'seatlog');
+const nText = calls.length;
+cv = drawPage(true, D0);
+assert.deepStrictEqual(cv.targets.filter((k) => /^log-/.test(k)), ['log-back'], 'only Back can be pressed');
+const journalJson = JSON.stringify(app.journal());
+const empty = app.journal; app.journal = () => [];
+drawPage(true, D0);
+app.journal = empty;
+assert.ok(calls.length > nText && journalJson.length > 0);
+drawPage(true, D0, 'log-back');
+assert.strictEqual(home.ui.view, 'seat');
 // the seat probe's list: read only, back to the seat list
 drawPage(true, D0, 'seat-module');
 assert.strictEqual(home.ui.view, 'seatinfo', 'Seat module opens the probe');
