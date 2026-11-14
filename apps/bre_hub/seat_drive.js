@@ -27,7 +27,7 @@ const MOTOR = Object.freeze({ slv: 0x00, shv: 0x01 });
 const ACTION = Object.freeze({ stop: 0x00, plus: 0x01, minus: 0x02 });
 const PWM = 100;
 
-const POLL_MS = 150;            // a position read this often while moving
+const POLL_MS = 200;            // a position read this often while moving (not faster: the transport is shared)
 const RESEND_MS = 1000;         // the motor command again this often
 const START_MS = 900;           // a motor gets this long to start moving (relay, inertia) before "no progress" counts
 const STALL_MS = 700;           // no progress for this long: an end stop or something in the way
@@ -52,8 +52,10 @@ class SeatDrive {
 
     get available() { return !!(this.link && this.link.available && this.link.diag); }
 
-    async _send(sid, data, timeoutMs) {
-        const reply = await this.link.diag.physical(FAS, sid, data, timeoutMs || 1500, replyTo(sid, data), { maxRetries: 1 });
+    /** tries: how often a busy transport is tried again (100, 200 ... ms apart); STOP gets more. */
+    async _send(sid, data, timeoutMs, tries) {
+        const reply = await this.link.diag.physical(FAS, sid, data, timeoutMs || 1500, replyTo(sid, data),
+            { maxRetries: tries === undefined ? 2 : tries, retryBaseMs: 100, callTimeoutMs: 1500 });
         if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
         if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
         if (reply[0] === sid + 0x40) return { ok: true };
@@ -68,11 +70,13 @@ class SeatDrive {
         if (!this.available) return { ok: false, reason: 'no diagnostic link' };
         const data = [0xD7, 0x08, MOTOR[axis], ACTION[action], PWM];
         this.log.info('seat: UDS -> FAS 2E ' + bytes(data) + ' (' + axis + ' ' + action + ')');
+        // a STOP must get through: it waits longer for a busy transport
+        const tries = action === 'stop' ? 5 : 2;
         try {
-            let r = await this._send(0x2E, data);
+            let r = await this._send(0x2E, data, null, tries);
             if (!r.ok && (r.nrc === 0x7E || r.nrc === 0x7F) && !this.extended) {
                 const s = await this._session();
-                if (s.ok) r = await this._send(0x2E, data);
+                if (s.ok) r = await this._send(0x2E, data, null, tries);
             }
             if (!r.ok) this.log.warn('seat: ' + axis + ' ' + action + ' not taken: ' + r.reason);
             return r;
@@ -119,14 +123,19 @@ class SeatMover {
         this.now = o.now || (() => Date.now());
         this.wait = o.sleep || sleep;
         this.busy = false; this.aborted = false; this.reason = null; this.axis = null;
+        // what a running move is doing, for the page: { axis, start, now, target, action, sent } or null
+        this.progress = null;
     }
 
     /** Stop what runs: the move sees it within one poll and sends STOP. */
     stop(reason) { if (this.busy) { this.aborted = true; this.reason = reason || 'stopped'; } }
 
-    /** The position, read quickly (no tries again: a late position would let the motor run on unseen). */
-    async _read() {
-        const h = await this.seat.read(DID.HALL, null, true);
+    /**
+     * The position. While a motor runs, read quickly (no tries again: a late position would let it run on unseen);
+     * before it starts (settled), the read may try again.
+     */
+    async _read(settled) {
+        const h = await this.seat.read(DID.HALL, null, !settled);
         return h.ok ? parseHall(h.data) : null;
     }
 
@@ -135,7 +144,7 @@ class SeatMover {
         const rises = this.probe.rises[axis];
         if (rises !== 'plus' && rises !== 'minus') { this.reason = 'direction not learned'; return false; }
         if (!this.guard()) { this.reason = 'not allowed now'; return false; }
-        const first = await this._read();
+        const first = await this._read(true);
         const start = first && first[axis];
         if (start === null || start === undefined) { this.reason = 'no position'; return false; }
         if (Math.abs(target - start) <= TOLERANCE) return true;
@@ -145,8 +154,10 @@ class SeatMover {
         this.log.info('seat: ' + axis + ' ' + start + ' -> ' + target + ' (' + action + ')');
         const t0 = this.now();
         let sentAt = t0, best = start, bestAt = t0, misses = 0, polls = 0, ok = false;
+        this.progress = { axis: axis, start: start, now: start, target: target, action: action, sent: null };
         try {
             const w = await this.drive.motor(axis, action);
+            this.progress.sent = !!w.ok;
             if (!w.ok) { this.reason = 'command not taken: ' + w.reason; return false; }
             for (;;) {
                 await this.wait(POLL_MS);
@@ -160,6 +171,7 @@ class SeatMover {
                     continue;
                 }
                 misses = 0;
+                this.progress.now = v;
                 if ((++polls) % 2 === 0) {
                     const s = await this.seat.read(DID.SWITCHES, null, true);
                     if (s.ok && parseSwitches(s.data).pressed) { this.reason = 'a seat switch was touched'; return false; }
@@ -180,8 +192,9 @@ class SeatMover {
             }
         } finally {
             await this.drive.motor(axis, 'stop');
-            this.axis = null;
+            this.axis = null; this.progress = null;
             if (!ok) this.log.warn('seat: ' + axis + ' stopped: ' + (this.reason || 'stopped'));
+            else this.log.info('seat: ' + axis + ' at ' + target);
         }
     }
 
@@ -229,7 +242,8 @@ class RealBackend {
     /** The driver's seat to target (fractions; back is not moved). Fore / aft back first, then height. */
     async goTo(seat, target) {
         if (seat !== 'driver') return false;
-        await this.probe.tick();                       // a fresh position before working out the move
+        // a fresh position before working out the move (one just read, e.g. by Easy Access's refresh, will do)
+        if (!this.probe.hallAt || Date.now() - this.probe.hallAt > 1500) await this.probe.tick();
         const now = this.status().seats.driver.pos;
         if (now.fore === null || now.height === null) { this.log.warn('seat: no position or direction yet (Seat module)'); return false; }
         const fore = target.fore === undefined || target.fore === null ? null : this.probe.countFor('slv', target.fore);

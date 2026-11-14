@@ -51,6 +51,12 @@ function seatFoot(app, ee, mode) {
         return { text: noPositionText(app, last.key), warn: last.key === 'ee.noPosition' };
     }
     if (mode !== 'armed') return { text: T('state.' + ee.state) + ' · ' + T('seats.demo') };
+    // the real seat moving: what it does right now - the position being read, or an axis and its counter live
+    if (ee.state === 'MOVING_OUT' || ee.state === 'MOVING_IN') {
+        const pr = app.seats && app.seats.progress ? app.seats.progress() : null;
+        if (!pr) return { text: T('seats.reading') };
+        return { text: T('seats.progress', { axis: T('axis.' + pr.axis), now: pr.now, target: pr.target }) };
+    }
     const why = app.seats && app.seats.reason ? app.seats.reason() : null;
     if (ee.state === 'STOPPED' && why) return { text: T('seats.stoppedWhy', { reason: why }), warn: true };
     if (ee.events[0] && ee.events[0].key === 'ee.noPosition' && ee.state === 'IDLE') return { text: noPositionText(app, 'ee.noPosition'), warn: true };

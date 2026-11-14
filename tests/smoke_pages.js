@@ -236,6 +236,12 @@ settingsValues.easyEntry = 'armed';
 app.seats.reason = () => 'a seat switch was touched';
 app.easyEntry.state = 'STOPPED';
 drawPage(true, D0);
+app.easyEntry.state = 'MOVING_OUT';                       // reading the position, then an axis live
+app.seats.progress = () => null;
+drawPage(true, D0);
+app.seats.progress = () => ({ axis: 'slv', now: 33068, target: 32765 });
+drawPage(true, D0);
+delete app.seats.progress;
 app.easyEntry.state = 'IDLE';
 delete app.seats.reason;
 home.ui.view = 'main';

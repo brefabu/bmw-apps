@@ -44,8 +44,8 @@ const AXES = Object.freeze({
     lnv: { i: 2, sw: [4, 5], norm: [8, 9], plus: null, minus: null, toward: null },           // backrest: not used yet
 });
 const MIN_TRAVEL = 500;          // counts between the ends seen before a position counts as a share of the travel
-const HALL_TRIES = 3;            // a position read that fails is tried again this many times in one poll
-const HALL_PAUSE_MS = 150;
+const HALL_TRIES = 2;            // a position read that fails is tried again in the same poll (each try is itself
+const HALL_PAUSE_MS = 300;       // tried again while the transport says busy: more would only crowd it)
 const STALE_MS = 5000;           // the last position read stands this long when reads fail (the seat did not move:
                                  // a move reads its own position before and while it runs)
 const MIN_STEP = 3;              // counts a poll must move for a direction sample
@@ -114,8 +114,10 @@ class SeatLink {
         diag.quiet = true;                      // polled while the probe is open: our own log lines say what matters
         try {
             // the transport turns a request away while it is busy with the one before: a few quick tries
-            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || (quick ? 600 : 2000), replyTo(0x22, req),
-                quick ? { maxRetries: 0, callTimeoutMs: 1000 } : { maxRetries: 3, retryBaseMs: 200 });
+            // (the transport's own call waits 8 s by default: never that long here)
+            // busy: tried again after 100, 200, 300, 400 ms (a move: once, after 100 ms)
+            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || (quick ? 600 : 1500), replyTo(0x22, req),
+                quick ? { maxRetries: 1, retryBaseMs: 100, callTimeoutMs: 1000 } : { maxRetries: 4, retryBaseMs: 100, callTimeoutMs: 1500 });
             if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
             if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
             if (reply[0] === 0x62) return { ok: true, data: reply.slice(3) };
@@ -300,11 +302,15 @@ class SeatProbe {
             this.log.info('seat probe: module found; motors ' + JSON.stringify(this.config) + ' (2 = with a position sensor); ' +
                 'initialised ' + (this.init ? JSON.stringify(this.init) : 'unread: ' + i.reason));
         }
+        const before = this.hall;
         const fresh = await this._readHall();
-        const m = await this.seat.read(DID.MOTOR);
-        this.motor = m.ok ? parseMotor(m.data) : null;
         const s = await this.seat.read(DID.SWITCHES);
         this.switches = s.ok ? parseSwitches(s.data) : null;
+        // the motors only while something moves (the counter changed or a switch is held): fewer requests
+        const moved = fresh && before && Object.keys(AXES).some((a) => this.hall[a] !== null && before[a] !== null && this.hall[a] !== before[a]);
+        let m = { ok: false, reason: 'not asked' };
+        if (moved || (this.switches && this.switches.pressed)) m = await this.seat.read(DID.MOTOR);
+        this.motor = m.ok ? parseMotor(m.data) : null;
         // the ends and the directions only from a position read in this poll
         if (fresh) {
             Object.keys(AXES).forEach((a) => {

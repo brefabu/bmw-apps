@@ -32,6 +32,33 @@ const FLAP = Object.freeze({
 
 const bytesToHex = (b) => (b || []).map((x) => hex(x)).join(' ');
 
+const GAP_MS = 25;              // between two requests (kit/runtime/readonly-diag.js, which Live Data uses on cars)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The transport turns requests away (APP_REQUEST_TEMPORARILY_NOT_ACCEPTED) when they come back to back, and
+ * other apps and BMW's own services use it too (seen on the G30, 15.11.2026). So, as the kit's read-only link
+ * does: every request of this Diag - the DME's and the seat's (seat_link.js, seat_drive.js share it) - one at a
+ * time and at least GAP_MS after the one before, and a busy transport tried again soon (100, 200, 300 ... ms)
+ * rather than after seconds.
+ */
+function pace(diag) {
+    const raw = diag.physical.bind(diag);
+    let chain = Promise.resolve(), next = 0;
+    diag.physical = function () {
+        const args = arguments;
+        const run = () => sleep(Math.max(0, next - Date.now()))
+            .then(() => raw.apply(null, args))
+            .then((r) => { next = Date.now() + GAP_MS; return r; }, (e) => { next = Date.now() + GAP_MS; throw e; });
+        const p = chain.then(run, run);
+        chain = p.catch(() => {});
+        return p;
+    };
+    diag.busyMs = 100;
+    diag.busyLog = false;
+    return diag;
+}
+
 class DmeLink {
     constructor(signals, log) {
         this.signals = signals; this.log = log;
@@ -45,6 +72,7 @@ class DmeLink {
 
     async init() {
         this.diag = await new Diag(this.signals, this.log).init();
+        pace(this.diag);
         this.available = !!this.diag.available;
         this.diag.on('available', (on) => {
             this.available = !!on;
@@ -105,4 +133,4 @@ class DmeLink {
     }
 }
 
-module.exports = { DmeLink, DME, FLAP, READS };
+module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS };

@@ -77,6 +77,8 @@ mgu.run({
             jog(seat, axis, dir) { return this.current().jog(seat, axis, dir); },
             stop(seat) { demoSeats.stop(seat); realSeats.stop(seat); },
             reason() { return armed() ? mover.reason : null; },
+            /** What a real move does right now ({ axis, now, target, ... }), or null (none, or the demo). */
+            progress() { return armed() ? mover.progress : null; },
         };
         const easyEntry = new seatsLib.EasyEntry(seats, positions, log);
         easyEntry.setOffset(settings.get('seatOffset'));

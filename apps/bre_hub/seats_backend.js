@@ -28,6 +28,15 @@ const JOG_HOLD_MS = 350;        // a jog stops when it is not repeated within th
 const TICK_MS = 50;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const REFRESH_MS = 6000;        // a backend's fresh position read: given up after this (the position then counts as unknown)
+
+/** p (a promise or a value), settled within ms whatever it does; never rejects. */
+function withTimeout(p, ms) {
+    return new Promise((resolve) => {
+        const t = setTimeout(resolve, ms);
+        Promise.resolve(p).then(() => { clearTimeout(t); resolve(); }, () => { clearTimeout(t); resolve(); });
+    });
+}
 
 /* ------------------------------------------------------------------ demo backend */
 
@@ -214,9 +223,9 @@ class EasyEntry {
     }
     goOut() {
         this.state = 'MOVING_OUT'; this.note('ee.movingOut');
-        // a fresh position first (the real seat: read from its module), then where the seat is now is the
-        // driving position to come back to
-        return Promise.resolve(this.backend.refresh ? this.backend.refresh() : null).catch(() => null).then(() => {
+        // a fresh position first (the real seat: read from its module, at most REFRESH_MS), then where the seat is
+        // now is the driving position to come back to
+        return withTimeout(this.backend.refresh ? this.backend.refresh() : null, REFRESH_MS).then(() => {
             if (this.state !== 'MOVING_OUT') return null;
             const now = this.backend.status().seats.driver.pos;
             if (!isFinite(now.fore) || !isFinite(now.height) || now.fore === null || now.height === null) {
@@ -235,7 +244,7 @@ class EasyEntry {
      * place of where it was when the car was switched off. Resolves true when saved.
      */
     savePosition() {
-        return Promise.resolve(this.backend.refresh ? this.backend.refresh() : null).catch(() => null).then(() => {
+        return withTimeout(this.backend.refresh ? this.backend.refresh() : null, REFRESH_MS).then(() => {
             const now = this.backend.status().seats.driver.pos;
             if (!isFinite(now.fore) || !isFinite(now.height) || now.fore === null || now.height === null) {
                 this.note('ee.noPosition');

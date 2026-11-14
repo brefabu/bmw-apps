@@ -208,12 +208,12 @@ Promise.resolve()
     assert.strictEqual(probe.percent('slv'), null);
 }))
 .then(() => test('a position read that fails: tried again in the same poll; then the last one stands a while, with why', async () => {
-    let fails = 2;
+    let fails = 1;
     const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD708: MOTOR_OFF, 0xD712: SW_NONE,
         0xD702: () => (fails-- > 0 ? null : hall(33068, 32523)) };
     const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null, { sleep: () => Promise.resolve() });
     await probe.tick();
-    assert.deepStrictEqual(probe.hall, { slv: 33068, shv: 32523, lnv: null }, 'read on the third try');
+    assert.deepStrictEqual(probe.hall, { slv: 33068, shv: 32523, lnv: null }, 'read on the second try');
     assert.strictEqual(probe.hallError, null);
     table[0xD702] = null;                                             // the module stops answering D702
     await probe.tick();
@@ -242,6 +242,26 @@ Promise.resolve()
     await second;
     assert.ok(probe.hall && probe.hall.slv === 33068, 'a finished read, not a poll halfway through');
     assert.strictEqual(probe.busy, false);
+}))
+.then(() => test('the shared link\'s pacing: one request at a time, GAP_MS apart, a failure does not stop the queue', async () => {
+    const { pace, GAP_MS } = require('../apps/bre_hub/dme_link');
+    let inFlight = 0, most = 0;
+    const starts = [], ends = [];
+    const diag = {
+        async physical(target, sid, data) {
+            inFlight++; most = Math.max(most, inFlight); starts.push(Date.now());
+            await new Promise((r) => setTimeout(r, 10));
+            inFlight--; ends.push(Date.now());
+            if (data[0] === 0xEE) throw new Error('transport refused');
+            return [sid + 0x40].concat(data);
+        },
+    };
+    pace(diag);
+    assert.strictEqual(diag.busyMs, 100, 'a busy transport tried again soon');
+    const all = [1, 2, 0xEE, 4, 5].map((b) => diag.physical(0x6D, 0x22, [b]).then((r) => r[1], (e) => 'failed'));
+    assert.deepStrictEqual(await Promise.all(all), [1, 2, 'failed', 4, 5], 'in order, the failure only fails its own');
+    assert.strictEqual(most, 1, 'never two at once');
+    for (let i = 1; i < starts.length; i++) assert.ok(starts[i] - ends[i - 1] >= GAP_MS - 2, 'a gap before request ' + i);
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');
