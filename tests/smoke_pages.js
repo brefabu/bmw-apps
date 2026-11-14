@@ -50,6 +50,7 @@ const stubs = {
     gauges: gauges,
     canvas: { withAlpha: (c) => c },
     themes: kitThemes,
+    record: { OP: { TRIS: 10, RECT: 1 } },
 };
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, parent) {
@@ -69,6 +70,8 @@ const { Exhaust } = require(path.join(app_dir, 'exhaust'));
 const { CarIdent, MODELS, typeKey } = require(path.join(app_dir, 'car_ident'));
 const Art = require(path.join(app_dir, 'car_art'));
 const home = require(path.join(app_dir, 'page_home'));
+const Picture = require(path.join(app_dir, 'car_picture'));
+Picture.use([], {});          // the pages below draw the car themselves, whether or not photographs are packed
 
 // the palettes join the kit's themes, so its header and focus ring are drawn in them (bre_design.js)
 Object.keys(D.PALETTES).forEach((id) => {
@@ -138,7 +141,7 @@ let n = 0;
                 [false, true].forEach((mv) => {
                     moving = mv;
                     Object.keys(datas).forEach((k) => {
-                        ['main', 'seat', 'exhaust', 'modes'].forEach((view) => {
+                        ['main', 'seat', 'exhaust', 'modes', 'paint'].forEach((view) => {
                             home.ui.view = view; home.ui.open = true; home.ui.k = 1;
                             try { drawPage(own, datas[k]); } catch (e) { e.message = view + ' / ' + k + ' / ' + lang + ': ' + e.message; throw e; }
                             n++;
@@ -159,7 +162,13 @@ text.setLanguage('en'); moving = false;
 const D0 = datas.parked;
 home.ui.view = 'main'; home.ui.open = true; home.ui.k = 1;
 let cv = drawPage(true, D0);
-assert.deepStrictEqual(cv.targets.filter((k) => /^main-/.test(k)), ['main-seat', 'main-exhaust', 'main-settings']);
+assert.deepStrictEqual(cv.targets.filter((k) => /^main-/.test(k)), ['main-seat', 'main-exhaust', 'main-paint', 'main-settings']);
+drawPage(true, D0, 'main-paint');
+assert.strictEqual(home.ui.view, 'paint');
+drawPage(true, D0, 'paint-bernina');
+assert.strictEqual(settingsValues.paint, 'bernina', 'the paint list sets the colour');
+drawPage(true, D0, 'paint-back');
+assert.strictEqual(home.ui.view, 'main');
 drawPage(true, D0, 'spot-exhaust');
 assert.strictEqual(home.ui.view, 'exhaust', 'the tailpipe hot spot opens the exhaust list');
 drawPage(true, D0, 'ex-open');
@@ -199,6 +208,42 @@ cv = drawPage(true, D0);
 assert.ok(cv.targets.indexOf('seat-try') < 0, 'driving: the seat is not moved');
 drawPage(true, D0, 'grip');
 assert.strictEqual(home.ui.open, false);
+
+// the car as photographs (car_picture.js), one per paint, here two cells each: drawn as a layer
+const zlib = require('zlib');
+const photoOf = (grey) => {
+    const cellData = Buffer.alloc(12 + 25);
+    [0, 0, 4, 2].forEach((v, i) => cellData.writeUInt16LE(v, i * 2));            // flat cell: x, y, w, h
+    cellData.writeUInt32BE(((grey << 24) | (grey << 16) | (grey << 8) | 255) >>> 0, 8);
+    [0, 2, 4, 2].forEach((v, i) => cellData.writeUInt16LE(v, 12 + i * 2));       // shaded cell, dark to light
+    cellData[20] = 0;
+    [0x202020ff, 0x808080ff, 0x202020ff, 0x808080ff].forEach((v, i) => cellData.writeUInt32BE(v, 21 + i * 4));
+    return { LW: 4, LH: 4, DW: 4, DH: 4, K: 1, NF: 1, NT: 1, ground: 3, seat: [1, 1], exhaust: [4, 2], data: zlib.deflateSync(cellData).toString('base64') };
+};
+Picture.use([{ id: 'mineral', name: 'Mineral Grey' }, { id: 'alpine', name: 'Alpine White' }], { mineral: photoOf(0x40), alpine: photoOf(0xe0) });
+assert.deepStrictEqual(Picture.list().map((e) => e.id), ['mineral', 'alpine']);
+assert.ok(Picture.available('alpine') && !Picture.available('carbon') && !Picture.available('../x'));
+let px = Picture.pixels('mineral');
+assert.deepStrictEqual([px.w, px.h, px.d[0], px.d[3]], [4, 4, 0x40, 255], 'as photographed');
+assert.ok(px.d[(2 * 4 + 0) * 4] < px.d[(2 * 4 + 3) * 4], 'the shaded cell runs from dark to light');
+assert.strictEqual(Picture.pixels('alpine').d[0], 0xe0, 'each paint is its own photograph');
+const layers = {};
+gauges.layer = (key, w, h, draw) => layers[key] || (layers[key] = (draw(canvas(true)), { layerId: Object.keys(layers).length + 1, w: w, h: h }));
+moving = false; home.ui.view = 'main'; home.ui.open = true; home.ui.k = 1;
+settingsValues.paint = 'mineral';
+const before = calls.length;
+cv = drawPage(true, D0);
+assert.ok(calls.slice(before).indexOf('blit') >= 0, 'the photograph is drawn as a layer');
+assert.ok(cv.targets.indexOf('spot-seat') >= 0 && cv.targets.indexOf('spot-exhaust') >= 0, 'with its hot spots');
+settingsValues.paint = 'alpine';
+drawPage(true, D0);
+assert.deepStrictEqual(Object.keys(layers).sort(), ['bre_car_picture|alpine', 'bre_car_picture|mineral'], 'a layer for each paint shown');
+settingsValues.paint = 'carbon';                 // no photograph of it: the drawing
+const nb = calls.length;
+cv = drawPage(true, D0);
+assert.ok(calls.slice(nb).indexOf('blit') < 0 && cv.targets.indexOf('spot-seat') >= 0, 'a paint without a photograph is drawn');
+delete gauges.layer;
+Picture.use([], {});
 
 app.exhaust.close();
 seats.close();

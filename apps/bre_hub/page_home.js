@@ -1,18 +1,22 @@
 'use strict';
 /**
  * page_home.js - BRE Hub's one page, laid out like iDrive 7's My Vehicle: a list on the left that folds away
- * on its grip, the car on the right (car_art.js) with a hot spot on the driver's seat and one at the tailpipe.
+ * on its grip, the car on the right with a hot spot on the driver's seat and one at the tailpipe. The car is the
+ * photograph of the paint chosen in the list when it is packed with the app (car_picture.js), else our drawing of
+ * it in that paint (car_art.js).
  *
- *   list 'main'     Seat Easy Access, Exhaust flap, Settings
+ *   list 'main'     Seat Easy Access, Exhaust flap, Paint, Settings
  *   list 'seat'     Easy Access on / off, how far back the seat goes, try it (the demo), Stop
  *   list 'exhaust'  Open / Closed / Auto / By driving mode, Driving modes, Hold
  *   list 'modes'    the flap for the Sport, Comfort and Eco Pro driving modes (a press steps to the next)
+ *   list 'paint'    the car's colour in the picture (the "paint" setting)
  * A hot spot opens its list. Nothing here moves a seat or the flap itself: the seat goes through
  * app.easyEntry (seats_backend.js, demo only, docs/07), the flap through app.exhaust (exhaust.js).
  */
 const G = require('./kit/gauges');
 const D = require('./bre_design');
 const Art = require('./car_art');
+const Picture = require('./car_picture');
 const { T } = require('./bre_text');
 
 // the list starts PANEL_X in: the HMI's back column covers the page's first few units (kit/runtime/display.js)
@@ -101,11 +105,22 @@ function rows(app, parked) {
             foot: ex.note ? { text: T(ex.note.key, ex.note.vars), warn: ex.note.warn } : null,
         };
     }
+    if (ui.view === 'paint') {
+        const now = Art.PAINTS[s.get('paint')] ? s.get('paint') : Art.DEFAULT_PAINT;
+        return {
+            list: [{ key: 'paint-back', icon: 'back', label: T('menu.paint'), run: () => show(app, 'main', 'main-paint') }]
+                .concat(Object.keys(Art.PAINTS).map((id) => ({ key: 'paint-' + id, label: Art.PAINTS[id].name, swatch: Art.PAINTS[id].base,
+                    tick: id === now, run: () => s.set('paint', id) }))),
+            foot: null,
+        };
+    }
     return {
         list: [
             { key: 'main-seat', icon: 'seat', label: T('menu.seat'), value: T(on ? 'on' : 'off'), next: true, run: () => show(app, 'seat', 'seat-on') },
             { key: 'main-exhaust', icon: 'exhaust', label: T('menu.exhaust'), value: T(FLAP_TEXT[ex.selected] || 'ex.auto'), next: true,
                 run: () => show(app, 'exhaust', 'ex-open') },
+            { key: 'main-paint', icon: 'paint', label: T('menu.paint'), value: Art.paintOf(s.get('paint')).name, next: true,
+                run: () => show(app, 'paint', 'paint-' + (Art.PAINTS[s.get('paint')] ? s.get('paint') : Art.DEFAULT_PAINT)) },
             { key: 'main-settings', icon: 'gear', label: T('menu.settings'), next: true, run: () => app.openSettings() },
         ],
         foot: null,
@@ -154,14 +169,29 @@ function draw(cv, t, app, d) {
     // the car, in what the list leaves free
     const ax = px + GRIP_W, aw = D.W - ax;
     const model = app.ident.model(), paint = Art.paintOf(app.settings.get('paint'));
-    const w = Math.min(1000, aw - 220), groundY = top + Math.round(h * 0.7);
+    const groundY = top + Math.round(h * 0.7);
     cv.gradientRect(ax, groundY, aw, bottom - groundY, [[0, '#191919'], [0.6, t.bg], [1, t.bg]]);
     const seat = app.seats.status().seats.driver, ex = app.exhaust.view();
-    const car = Art.draw(cv, t, {
-        x: ax + Math.round((aw - w) / 2) - 12, groundY: groundY, w: w, shape: model.shape, paint: app.settings.get('paint'),
-        bg: t.bg, seat: { fore: seat.pos.fore, height: seat.pos.height, back: seat.pos.back, moving: seat.moving },
-        flap: ex.effective,
-    });
+    const paintId = Art.PAINTS[app.settings.get('paint')] ? app.settings.get('paint') : Art.DEFAULT_PAINT;
+    const pic = Picture.info(paintId);
+    let car = null;
+    if (pic) {
+        // the photograph, at its own size (its cells sit on the screen's pixels)
+        const x = ax + Math.round((aw - pic.LW) / 2) - 16, y = groundY - Math.round(pic.ground);
+        if (Picture.blit(cv, G, x, y, paintId)) {
+            const tx = x + pic.exhaust[0] - 14, ty = y + pic.exhaust[1];
+            Art.waves(cv, t, tx, ty, 0.17, ex.effective);
+            car = { seat: [x + pic.seat[0], y + pic.seat[1]], exhaust: [tx + 44, ty] };
+        }
+    }
+    if (!car) {
+        const w = Math.min(1000, aw - 220);
+        car = Art.draw(cv, t, {
+            x: ax + Math.round((aw - w) / 2) - 12, groundY: groundY, w: w, shape: model.shape, paint: paintId,
+            bg: t.bg, seat: { fore: seat.pos.fore, height: seat.pos.height, back: seat.pos.back, moving: seat.moving },
+            flap: ex.effective,
+        });
+    }
     const focus = app.focusKey ? app.focusKey() : null;
     D.hotspot(cv, t, car.seat[0], car.seat[1], { key: 'spot-seat', on: ui.view === 'seat' || focus === 'spot-seat', run: () => show(app, 'seat', 'seat-on') });
     D.hotspot(cv, t, car.exhaust[0], car.exhaust[1], { key: 'spot-exhaust', on: ui.view === 'exhaust' || ui.view === 'modes' || focus === 'spot-exhaust',

@@ -19,7 +19,7 @@ function plain(s) {
 const TEXTS = {
     en: {
         'on': 'On', 'off': 'Off',
-        'menu.seat': 'Seat Easy Access', 'menu.exhaust': 'Exhaust flap', 'menu.settings': 'Settings',
+        'menu.seat': 'Seat Easy Access', 'menu.exhaust': 'Exhaust flap', 'menu.paint': 'Paint', 'menu.settings': 'Settings',
         'chip.demo': 'Demo', 'chip.parked': 'Parked', 'chip.moving': 'Driving',
         'seats.easy': 'Easy Access', 'seats.offset': 'Move back to',
         'seats.tryOut': 'Try: get out', 'seats.tryIn': 'Try: get in', 'seats.stop': 'Stop', 'seats.reset': 'Ready again',
@@ -41,7 +41,7 @@ const TEXTS = {
     },
     ro: {
         'on': 'Pornit', 'off': 'Oprit',
-        'menu.seat': 'Seat Easy Access', 'menu.exhaust': 'Clapetă evacuare', 'menu.settings': 'Setări',
+        'menu.seat': 'Seat Easy Access', 'menu.exhaust': 'Clapetă evacuare', 'menu.paint': 'Culoare', 'menu.settings': 'Setări',
         'chip.demo': 'Demo', 'chip.parked': 'Parcat', 'chip.moving': 'În mers',
         'seats.easy': 'Easy Access', 'seats.offset': 'Mută în spate la',
         'seats.tryOut': 'Probă: coborâre', 'seats.tryIn': 'Probă: urcare', 'seats.stop': 'Stop', 'seats.reset': 'Pregătit din nou',

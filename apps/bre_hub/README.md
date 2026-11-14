@@ -1,15 +1,27 @@
-# bre_hub: BRE Hub
+# bre_hub: BRE Hub ("My car")
 
-The main app (docs/09): Home, Seats (Easy Entry, demo backend only) and Motor. Files are flat on purpose:
-kit/tools/build.py packs only this folder's top-level .js files (docs/03). This README is not packed.
+The main app (docs/09). One page, laid out like iDrive 7's My Vehicle: a list on the left that folds away, the
+car on the right with a hot spot on the driver's seat and one at the tailpipe. Files are flat on purpose:
+kit/tools/build.py packs only this folder's top-level .js files (docs/03). This README and NOTICE are not packed.
 
 | File | What it is |
 | --- | --- |
 | `app.json` | id, signals, screen, settings |
-| `main.js` | the shell: pages, tabs, render loop, shared `app` state |
+| `main.js` | the shell: shared `app` state, render loop, settings, the car's signals |
 | `bre_design.js` | the design system: tokens and components (docs/08) |
-| `bre_text.js` | Romanian and English texts; no diacritics drawn until the fonts are re-baked |
-| `page_home.js`, `page_seats.js`, `page_motor.js` | the pages |
-| `seats_backend.js` | seat backends (`demo`) and the Easy Entry state machine (docs/07) |
+| `bre_text.js` | English (default) and Romanian texts; no diacritics drawn until the fonts are re-baked |
+| `page_home.js` | the page: the lists (main, seat, exhaust, driving modes, paint) and the car |
+| `car_art.js` | the car, drawn from the side (used when no photograph is packed); paints |
+| `car_picture.js` | the car's photograph, one per paint: cells drawn once into a cached layer; only the paint shown is loaded |
+| `car_photos.js`, `car_photo_<id>.js` | the photographs, made by `node tools/car_photo.js reference/colours.json`. Stock renders, not ours: see THIRD_PARTY.md |
+| `car_ident.js` | which car it is: the setting, or the VIN's type key read from the DME (read only; table not yet confirmed on a car) |
+| `seats_backend.js` | seat backends (`demo` only) and Seat Easy Access: back to 75 % of the rail and fully down (docs/07) |
+| `dme_link.js` | the only file that sends a request to the car: three reads and the exhaust flap's three `2F 60FD` requests |
+| `exhaust.js` | the exhaust flap: Open / Closed / Auto / by driving mode, held every 15 s, Closed handed back above a set engine speed. Ships disarmed (simulated) |
+| `NOTICE` | source and licence of the code adapted from idrive7-apps Engine Config (MIT) |
 
-Tests: `node tests/test_seats_backend.js` and `node tests/smoke_pages.js` from the repository root.
+Tests, from the repository root: `node tests/test_seats_backend.js`, `node tests/test_exhaust.js` and
+`node tests/smoke_pages.js`.
+
+Before the first test on a car: the exhaust flap stays Disarmed until its command was checked on that car
+(docs/06, docs/10). Armed, it writes only when the DME answers the flap's identifiers.

@@ -6,7 +6,7 @@ Proiectul lui Fabian (GitHub `brefabu`, BUN Technologies): aplicații proprii pe
 
 - Cu Fabian vorbești **în română**. Documentația din `docs/` e în română.
 - Codul, comentariile, mesajele de commit și log-urile sunt **în engleză**.
-- Textele din interfață trec prin `apps/bre_hub/bre_text.js` (RO și EN), niciodată scrise direct în pagini.
+- Interfața e **în engleză** (implicit), cu româna ca opțiune. Textele trec prin `apps/bre_hub/bre_text.js` (EN și RO), niciodată scrise direct în pagini.
 
 ## Structura
 
@@ -14,9 +14,14 @@ Proiectul lui Fabian (GitHub `brefabu`, BUN Technologies): aplicații proprii pe
 apps/bre_hub/        aplicația principală (fișiere plate: build-ul ia doar .js-urile de pe primul nivel)
   main.js            shell: pagini, tab-uri, bucla de desen, setări
   bre_design.js      design system: tokenuri și componente (docs/08)
-  bre_text.js        texte RO/EN; fără diacritice până refacem fonturile
-  page_*.js          paginile/modulele
-  seats_backend.js   backend-urile de scaune (doar demo acum) și mașina de stări Easy Entry (docs/07)
+  bre_text.js        texte EN (implicit) și RO; fără diacritice până refacem fonturile
+  page_home.js       singura pagină („My car”), ca My Vehicle din iDrive 7: lista din stânga, mașina cu puncte active în dreapta
+  car_art.js         desenul mașinii (profil, culoare din setări); car_ident.js: modelul, din setare sau din cheia de tip a VIN-ului (doar citire)
+  car_picture.js     fotografia mașinii ca celule într-un strat, câte una pentru fiecare culoare din „Paint”; car_photo_<id>.js și car_photos.js sunt generate (randări de stoc, vezi THIRD_PARTY.md)
+  seats_backend.js   backend-urile de scaune (doar demo acum) și Seat Easy Access: 75 % în spate și complet jos (docs/07)
+  dme_link.js        SINGURUL fișier care trimite cereri spre mașină: 3 citiri (VIN, clapetă) și cele 3 comenzi ale clapetei (2F 60FD)
+  exhaust.js         clapeta de evacuare: deschis / închis / auto / după modul de condus, ținere la 15 s, protecție la turație; pornește dezarmată
+  NOTICE             sursa și licența codului adaptat din idrive7-apps Engine Config (MIT)
 kit/                 copia NESCHIMBATĂ a kitului idrive7-apps (MIT; renderd și emu GPL-3.0); vezi kit/SOURCE.json
 patches/kit/         singurele noastre modificări la kit (de exemplu fonturi cu diacritice), notate în kit/PATCHES.md
 tools/update-kit.sh  aduce kitul din upstream și aplică patches/kit/
@@ -28,7 +33,9 @@ mgu-repo.json        manifestul de sursă pentru MGU Store (docs/04)
 ## Comenzi
 
 ```sh
-node tests/test_seats_backend.js && node tests/smoke_pages.js   # înainte de fiecare commit
+node tests/test_seats_backend.js && node tests/test_exhaust.js && node tests/smoke_pages.js   # înainte de fiecare commit
+docker compose up --build                                        # emulatorul pe Windows: http://localhost:8077, merge și fără oap-sdk/ (docs/03)
+node tools/car_photo.js reference/colours.json                   # pozele pe culori -> apps/bre_hub/car_photo_<id>.js (+ previzualizări în reference/)
 python3 kit/tools/build.py bre_hub                               # build; cere oap-sdk/ extras din unitate (docs/03)
 node kit/tools/emu.js bre_hub                                    # emulatorul: http://localhost:8077 (cere și el oap-sdk/)
 python3 kit/tools/build.py --preview-only bre_hub                # fără SDK: doar previzualizare offline

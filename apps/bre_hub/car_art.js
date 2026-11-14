@@ -11,13 +11,16 @@
  */
 const { withAlpha } = require('./kit/canvas');
 
-// paint: base (the panels), light (what catches the light), dark (what is in shadow)
+// The paints there are photographs of (reference/colours.json -> car_photo_<id>.js; the names are our reading of
+// the renders, not BMW's labels). For the drawing, when no photograph is packed: base (the panels, as measured on
+// the render's door), light (what catches the light), dark (what is in shadow).
 const PAINTS = {
-    mineral: { name: 'Mineral Grey', base: '#5c6165', light: '#a9afb4', dark: '#2a2d30' },
-    sapphire: { name: 'Black Sapphire', base: '#1c1e22', light: '#626871', dark: '#0a0b0d' },
-    alpine: { name: 'Alpine White', base: '#d3d5d6', light: '#ffffff', dark: '#8b8e90' },
-    phytonic: { name: 'Phytonic Blue', base: '#1e3b60', light: '#6187b5', dark: '#0d1b2e' },
-    glacier: { name: 'Glacier Silver', base: '#a7acb0', light: '#e8ebed', dark: '#5b5f63' },
+    mineral: { name: 'Mineral Grey', base: '#3a3b3d', light: '#8a8d91', dark: '#1a1b1c' },
+    bernina: { name: 'Bernina Grey', base: '#53585d', light: '#a3a9ae', dark: '#26292c' },
+    glacier: { name: 'Glacier Silver', base: '#8d909a', light: '#e2e5eb', dark: '#50535b' },
+    alpine: { name: 'Alpine White', base: '#dddddd', light: '#ffffff', dark: '#9a9c9e' },
+    carbon: { name: 'Carbon Black', base: '#2a292e', light: '#6b6a72', dark: '#0e0e11' },
+    brooklyn: { name: 'Brooklyn Grey', base: '#6e6a72', light: '#bcb8c2', dark: '#38353b' },
 };
 const DEFAULT_PAINT = 'mineral';
 
@@ -91,9 +94,20 @@ function wheel(cv, cx, cy, r, s, spin) {
     cv.circle(cx, cy, r * 0.07, '#2a2c2f');
 }
 
+/** The sound out of the tailpipe at x, y: three waves in the accent while the flap is open, one dim one on auto. */
+function waves(cv, t, x, y, s, flap) {
+    if (flap !== 'OPEN' && flap !== 'OEM') return;
+    const c = flap === 'OPEN' ? t.accent : t.tick;
+    for (let i = 1; i <= (flap === 'OPEN' ? 3 : 1); i++) {
+        const r = (40 + i * 34) * s, wave = [];
+        for (let a = -50; a <= 50; a += 10) wave.push([x + Math.cos(a * Math.PI / 180) * r, y + Math.sin(a * Math.PI / 180) * r]);
+        cv.polyline(wave, 2, withAlpha(c, 1 - i * 0.22));
+    }
+}
+
 /**
  * Draw the car. o: { x, groundY, w (the car's length on the page), shape, paint, bg (the page behind it),
- * seat: { fore, height, back, moving }, flap: 'OPEN' | 'CLOSED' | 'OEM', accent, warn }.
+ * seat: { fore, height, back, moving }, flap: 'OPEN' | 'CLOSED' | 'OEM', warn }.
  * Returns { seat: [x, y], exhaust: [x, y], top, h, s }.
  */
 function draw(cv, t, o) {
@@ -153,17 +167,10 @@ function draw(cv, t, o) {
     const tp = sh.tip, tx = X(tp[1]), ty = Y((tp[2] + tp[3]) / 2);
     cv.roundRect(X(tp[0]), Y(tp[3]), (tp[1] - tp[0]) * s, (tp[3] - tp[2]) * s, 5 * s, '#b9bdc1');
     cv.roundRect(X(tp[1] - 34), Y(tp[3] - 8), 30 * s, (tp[3] - tp[2] - 16) * s, 3 * s, '#17181a');
-    if (o.flap === 'OPEN' || o.flap === 'OEM') {
-        const c = o.flap === 'OPEN' ? (o.accent || t.accent) : t.tick;
-        for (let i = 1; i <= (o.flap === 'OPEN' ? 3 : 1); i++) {
-            const r = (40 + i * 34) * s, wave = [];
-            for (let a = -50; a <= 50; a += 10) wave.push([tx + Math.cos(a * Math.PI / 180) * r, ty + Math.sin(a * Math.PI / 180) * r]);
-            cv.polyline(wave, px(2), withAlpha(c, 1 - i * 0.22));
-        }
-    }
+    waves(cv, t, tx, ty, s, o.flap);
 
     return { seat: [X(sh.seatSpot[0]), Y(sh.seatSpot[1])], exhaust: [X(sh.exhaustSpot[0]), Y(sh.exhaustSpot[1])],
         top: Y(sh.height), h: sh.height * s, s: s };
 }
 
-module.exports = { draw, PAINTS, DEFAULT_PAINT, SHAPES, paintOf };
+module.exports = { draw, waves, PAINTS, DEFAULT_PAINT, SHAPES, paintOf };

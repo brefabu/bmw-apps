@@ -208,7 +208,7 @@ function chip(cv, t, x, y, text, kind) {
     return w;
 }
 
-/** A line icon in a size x size box at x, y: 'seat' | 'exhaust' | 'gear' | 'back' | 'next' | 'check'. */
+/** A line icon in a size x size box at x, y: 'seat' | 'exhaust' | 'paint' | 'gear' | 'back' | 'next' | 'check'. */
 function icon(cv, t, name, x, y, size, color) {
     const c = color || t.text, u = size / 24, w = Math.max(2, 2 * u);
     const L = (pts) => cv.polyline(pts.map((p) => [x + p[0] * u, y + p[1] * u]), w, c);
@@ -221,6 +221,9 @@ function icon(cv, t, name, x, y, size, color) {
         cv.strokeRoundRect(x + 2 * u, y + 8 * u, 12 * u, 8 * u, 3 * u, w, c);
         L([[14, 12], [19, 12]]);
         cv.strokeRoundRect(x + 19 * u, y + 9.5 * u, 4 * u, 5 * u, 1.5 * u, w, c);
+    } else if (name === 'paint') {
+        // a drop
+        L([[12, 3], [6.5, 12], [6, 15.5], [8, 19], [12, 20.5], [16, 19], [18, 15.5], [17.5, 12], [12, 3]]);
     } else if (name === 'gear') {
         cv.arc(x + 12 * u, y + 12 * u, 5 * u, 5 * u + w, 0, 360, c);
         for (let i = 0; i < 8; i++) {
@@ -236,8 +239,8 @@ function icon(cv, t, name, x, y, size, color) {
 /**
  * One row of an iDrive 7 list in rect r: an icon, the label, on the right a value, a check box (check: true /
  * false) or a tick (tick: true, the chosen one of several), a chevron for a row that opens another list.
- * o: { icon, label, value, check, tick, next, focus (the controller is on it: the selection), color (the
- * label's), dim (nothing to press), run, key }. The kit draws the controller's ring round its target.
+ * o: { icon, swatch (a colour shown as a square before the label), label, value, check, tick, next, focus (the
+ * controller is on it: the selection), color (the label's), dim (nothing to press), run, key }. The kit draws the controller's ring round its target.
  */
 function listRow(cv, t, r, opts) {
     const o = opts || {};
@@ -248,6 +251,11 @@ function listRow(cv, t, r, opts) {
     const c = o.dim ? t.dim : o.color || t.text, base = r.y + r.h / 2 + TYPE.heading.size * 0.34;
     let x = r.x + SPACE.m;
     if (o.icon) { icon(cv, t, o.icon, x, r.y + (r.h - 32) / 2, 32, c); x += 32 + SPACE.s; }
+    if (o.swatch) {
+        cv.fillRect(x, r.y + (r.h - 28) / 2, 28, 28, o.swatch);
+        cv.strokeRoundRect(x, r.y + (r.h - 28) / 2, 28, 28, 0, 1.5, t.panelEdge);
+        x += 28 + SPACE.s;
+    }
     cv.text(String(o.label), x, base, TYPE.heading.size, c, { font: TYPE.heading.font });
     let right = r.x + r.w - SPACE.m;
     if (o.next) { icon(cv, t, 'next', right - 22, r.y + (r.h - 22) / 2, 22, t.dim); right -= 22 + SPACE.xs; }

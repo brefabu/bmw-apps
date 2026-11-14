@@ -2,6 +2,8 @@ BRE Hub ("My car") contains code adapted from third parties.
 
 dme_link.js and exhaust.js are adapted from idrive7-apps, apps/live_adjustments (Engine Config):
 diaglink.js, real_adapters.js, controller.js, adapters.js and auto.js.
+car_picture.js (a picture kept as flat and shaded cells, drawn once into a cached layer) is adapted from
+muffler_img.js of the same app.
   Source:  https://github.com/cauliflowermossgrape/idrive7-apps
   Commit:  8d860de5818a2da11d3a3750aab36866cecf6bde
   License: MIT, Copyright (c) 2026 cauliflowermossgrape

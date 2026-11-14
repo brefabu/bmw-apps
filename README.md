@@ -8,7 +8,7 @@ Aplicații proprii pentru unitatea BMW iDrive 7 (MGU), instalate prin [MGU Store
 
 | | |
 | --- | --- |
-| [`apps/bre_hub/`](apps/bre_hub) | BRE Hub: Acasă, Scaune (Easy Entry în modul demo), Motor; design system și texte RO/EN |
+| [`apps/bre_hub/`](apps/bre_hub) | BRE Hub, pe ecran „My car”: o pagină în stilul My Vehicle din iDrive 7, cu Seat Easy Access (demo) și clapeta de evacuare (pornește dezarmată); design system și texte EN/RO |
 | [`docs/`](docs/README.md) | tot ce știm despre platformă, ecosistem, licențe, design, plan și siguranță |
 | [`kit/`](kit/SOURCE.json) | kitul din [idrive7-apps](https://github.com/cauliflowermossgrape/idrive7-apps), neschimbat: runtime, build, emulator |
 | [`tests/`](tests) | teste care rulează fără mașină și fără kit |
@@ -20,7 +20,7 @@ Aplicații proprii pentru unitatea BMW iDrive 7 (MGU), instalate prin [MGU Store
 Ai nevoie de Python 3.6+ și Node.js 14+. Pentru emulator și pachete, și de SDK-ul BMW extras din unitatea ta ([docs/03](docs/03-cum-se-face-o-aplicatie.md)).
 
 ```sh
-node tests/test_seats_backend.js && node tests/smoke_pages.js
+node tests/test_seats_backend.js && node tests/test_exhaust.js && node tests/smoke_pages.js
 python3 kit/tools/build.py bre_hub && node kit/tools/emu.js bre_hub     # http://localhost:8077
 ```
 
@@ -28,7 +28,7 @@ Pe Windows, emulatorul rulează în container, cu sau fără SDK: `docker compos
 
 ## În mașină
 
-Store → Settings → **Add source** → `brefabu/mgu-apps` → **branch (main)** (sau **Tags** pentru versiuni testate). Pentru repo privat, adaugă un token în Settings → Accounts ([docs/04](docs/04-publicare-in-store.md)).
+Store → Settings → **Add source** → `brefabu/bmw-apps` → **branch (main)** (sau **Tags** pentru versiuni testate). Pentru repo privat, adaugă un token în Settings → Accounts ([docs/04](docs/04-publicare-in-store.md)).
 
 ## Licențe
 
