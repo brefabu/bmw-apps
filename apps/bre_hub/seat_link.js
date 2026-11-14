@@ -16,7 +16,8 @@
  * probe is how we find out that its module answers the same.
  *
  * The travel: the lowest and highest counter seen per axis (moving the seat end to end with its own switches
- * measures it), kept in bre_seat_travel.json in the app's data folder. Nothing else is kept.
+ * measures it), and which way each counter runs (learned while it moves, see AXES), kept in bre_seat_travel.json
+ * in the app's data folder. Nothing else is kept.
  */
 const fs = require('fs');
 const path = require('path');
@@ -28,15 +29,22 @@ const DID = Object.freeze({ CONFIG_HW: 0xD700, HALL: 0xD702, INIT: 0xD704, MOTOR
 const READS = Object.freeze([DID.CONFIG_HW, DID.HALL, DID.INIT, DID.MOTOR, DID.SWITCHES]);
 
 // the axes we show: their index in D700 / D702 (x2) / D708, and their switches' bytes in D712 (+, -).
-// up: which way the Hall counter rises, as the app counts the axis (seats_backend.js: fore 0 = fully forward,
-// 1 = fully back; height 0 = fully down, 1 = fully up). Measured on the G30 on 15.11.2026 (docs/07): the counter
-// rises toward the front (32627 back .. 33321 front) and up (32473 down .. 33217 up), as PLUS is "vor, auf".
+// plus / minus: where the motor's PLUS and MINUS take the seat (TAB_STATUS_MOTOR: "Plus, vor, auf"; "Minus,
+// zurueck, ab"). toward: the end the app counts the axis toward (seats_backend.js: fore 0 = fully forward ..
+// 1 = fully back; height 0 = fully down .. 1 = fully up).
+// Which way the Hall COUNTER runs is not assumed: it is learned on the car (SeatProbe, rises), from the counter
+// moving while the module reports its motor (D708) or the seat's switch (D712) on PLUS or MINUS. On the G30 two
+// readings disagreed (photos: rising toward the front; the live % on 0.2.3: rising toward the back), and a wrong
+// direction would drive the seat toward the wheel: so nothing is shown as a share, and no target is worked out,
+// before an axis has shown its direction.
 const AXES = Object.freeze({
-    slv: { i: 0, sw: [0, 1], norm: [1, 2], app: 'fore', rises: 'front' },     // fore / aft (Sitzlaengsverstellung)
-    shv: { i: 1, sw: [2, 3], norm: [6, 7], app: 'height', rises: 'up' },      // height (Sitzhoehenverstellung)
-    lnv: { i: 2, sw: [4, 5], norm: [8, 9], app: 'back', rises: null },        // backrest: not used yet
+    slv: { i: 0, sw: [0, 1], norm: [1, 2], plus: 'front', minus: 'back', toward: 'back' },   // fore / aft (SLV)
+    shv: { i: 1, sw: [2, 3], norm: [6, 7], plus: 'up', minus: 'down', toward: 'up' },          // height (SHV)
+    lnv: { i: 2, sw: [4, 5], norm: [8, 9], plus: null, minus: null, toward: null },           // backrest: not used yet
 });
 const MIN_TRAVEL = 500;          // counts between the ends seen before a position counts as a share of the travel
+const MIN_STEP = 3;              // counts a poll must move for a direction sample
+const VOTES = 2;                 // agreeing samples (and twice the disagreeing ones) to learn a direction
 const HALL_MIN = 8192, HALL_MAX = 57344;
 const TRAVEL_FILE = 'bre_seat_travel.json';
 
@@ -69,14 +77,15 @@ function parseMotor(d) {
     Object.keys(AXES).forEach((a) => { const v = d[AXES[a].i]; out[a] = v === 0 ? 'off' : v === 1 ? 'plus' : v === 2 ? 'minus' : null; });
     return out;
 }
-/** D712 -> { pressed: any switch of ours held, axes: { slv: true | false | null } }. */
+/** D712 -> { pressed: any switch of ours held, axes: { slv: 'plus' | 'minus' | false | null } }. */
 function parseSwitches(d) {
     const axes = {};
     let pressed = false;
     Object.keys(AXES).forEach((a) => {
-        const s = AXES[a].sw.map((i) => d[i]);
-        axes[a] = s.some((v) => v === 1) ? true : s.every((v) => v === 0 || v === 2) ? false : null;
-        if (axes[a]) pressed = true;
+        const p = d[AXES[a].sw[0]], m = d[AXES[a].sw[1]];
+        axes[a] = p === 1 && m !== 1 ? 'plus' : m === 1 && p !== 1 ? 'minus'
+            : [p, m].every((v) => v === 0 || v === 2) ? false : null;
+        if (p === 1 || m === 1) pressed = true;
     });
     return { pressed: pressed, axes: axes };
 }
@@ -120,35 +129,47 @@ class SeatProbe {
         this.state = 'idle';            // idle | reading | found | none | nolink
         this.reason = null;             // why 'none': the module's refusal or 'timeout'
         this.config = null; this.init = null; this.hall = null; this.motor = null; this.switches = null;
-        this.travel = this._load();     // { slv: [min, max], ... }
+        const saved = this._load();
+        this.travel = saved.travel;     // { slv: [min, max], ... }: the lowest and highest counter seen
+        this.rises = saved.rises;       // { slv: 'plus' | 'minus' }: the motor direction that makes the counter rise
+        this._votes = {}; this._prev = null;
         this.busy = false; this._saveAt = 0; this._dirty = false; this._last = '';
     }
 
     _load() {
+        const out = { travel: {}, rises: {} };
         try {
             const t = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-            const out = {};
             Object.keys(AXES).forEach((a) => {
                 const r = t && t[a];
-                if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && v >= HALL_MIN && v <= HALL_MAX)) out[a] = [r[0], r[1]];
+                if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && v >= HALL_MIN && v <= HALL_MAX)) out.travel[a] = [r[0], r[1]];
+                const d = t && t.rises && t.rises[a];
+                if (AXES[a].plus && (d === 'plus' || d === 'minus')) out.rises[a] = d;
             });
-            return out;
-        } catch (e) { return {}; }
+        } catch (e) { /* none yet */ }
+        return out;
     }
 
     _save() {
         if (!this.file || !this._dirty || Date.now() - this._saveAt < 2000) return;
         this._dirty = false; this._saveAt = Date.now();
-        try { fs.writeFileSync(this.file, JSON.stringify(this.travel)); } catch (e) { this.log.warn('seat travel: ' + e); }
+        const doc = Object.assign({}, this.travel, { rises: this.rises });
+        try { fs.writeFileSync(this.file, JSON.stringify(doc)); } catch (e) { this.log.warn('seat travel: ' + e); }
     }
 
-    /** Forget the measured ends (to measure them again). */
-    resetTravel() { this.travel = {}; this._dirty = true; this._saveAt = 0; this._save(); }
+    /** Forget the measured ends and the learned directions (to measure them again). */
+    resetTravel() { this.travel = {}; this.rises = {}; this._votes = {}; this._dirty = true; this._saveAt = 0; this._save(); }
 
-    /** Both ends of the axis seen (at least MIN_TRAVEL apart) and its direction known. */
+    /** Where a rising counter takes the seat on this axis ('front' | 'back' | 'up' | 'down'), or null (not learned). */
+    risesToward(a) {
+        const d = this.rises[a], ax = AXES[a];
+        return ax && ax.plus && d ? (d === 'plus' ? ax.plus : ax.minus) : null;
+    }
+
+    /** Both ends of the axis seen (at least MIN_TRAVEL apart) and its direction learned. */
     measured(a) {
         const r = this.travel[a];
-        return !!(r && AXES[a] && AXES[a].rises && r[1] - r[0] >= MIN_TRAVEL);
+        return !!(r && this.risesToward(a) && r[1] - r[0] >= MIN_TRAVEL);
     }
 
     /** A counter as the app counts the axis: fore 0 front .. 1 back, height 0 down .. 1 up; null unmeasured. */
@@ -156,15 +177,47 @@ class SeatProbe {
         const r = this.travel[a];
         if (!this.measured(a) || count === null || count === undefined) return null;
         const up = (count - r[0]) / (r[1] - r[0]);
-        return Math.max(0, Math.min(1, AXES[a].rises === 'front' ? 1 - up : up));
+        return Math.max(0, Math.min(1, this.risesToward(a) === AXES[a].toward ? up : 1 - up));
     }
 
     /** The counter for a fraction of the axis (the reverse of fraction()); null unmeasured. */
     countFor(a, f) {
         const r = this.travel[a];
         if (!this.measured(a)) return null;
-        const up = AXES[a].rises === 'front' ? 1 - f : f;
-        return Math.round(r[0] + Math.max(0, Math.min(1, up)) * (r[1] - r[0]));
+        const g = Math.max(0, Math.min(1, f));
+        const up = this.risesToward(a) === AXES[a].toward ? g : 1 - g;
+        return Math.round(r[0] + up * (r[1] - r[0]));
+    }
+
+    /**
+     * Learn which way the counters run: between two polls, an axis whose counter moved while the module reported
+     * its motor (D708), else the seat's switch (D712), on PLUS or MINUS is one sample. VOTES agreeing samples, and
+     * at least twice the disagreeing ones, set the direction; a learned one that the samples come to contradict
+     * is dropped again (the shares and the target go with it).
+     */
+    _learn() {
+        const prev = this._prev;
+        this._prev = this.hall;
+        if (!prev || !this.hall) return;
+        Object.keys(AXES).forEach((a) => {
+            if (!AXES[a].plus) return;
+            const v = this.hall[a], p = prev[a];
+            if (v === null || p === null || p === undefined || Math.abs(v - p) < MIN_STEP) return;
+            const mo = this.motor && this.motor[a], sw = this.switches && this.switches.axes[a];
+            const run = mo === 'plus' || mo === 'minus' ? mo : sw === 'plus' || sw === 'minus' ? sw : null;
+            if (!run) return;
+            const sample = (v > p) === (run === 'plus') ? 'plus' : 'minus';
+            const n = this._votes[a] || (this._votes[a] = { plus: 0, minus: 0 });
+            n[sample]++;
+            const other = sample === 'plus' ? 'minus' : 'plus';
+            if (n[sample] >= VOTES && n[sample] >= 2 * n[other] && this.rises[a] !== sample) {
+                this.rises[a] = sample; this._dirty = true;
+                this.log.info('seat probe: ' + a + ' counter rises toward the ' + this.risesToward(a) + ' (' + n.plus + ' / ' + n.minus + ' samples)');
+            } else if (this.rises[a] && this.rises[a] !== sample && n[sample] * 2 > n[other]) {
+                delete this.rises[a]; this._dirty = true;
+                this.log.warn('seat probe: ' + a + ' direction contradicted (' + n.plus + ' / ' + n.minus + '): learning it again');
+            }
+        });
     }
 
     /** Where the axis is now, 0..100 as the app counts it (fore: % back; height: % up), or null. */
@@ -218,8 +271,9 @@ class SeatProbe {
                     const r = this.travel[a];
                     if (!r) { this.travel[a] = [v, v]; this._dirty = true; } else if (v < r[0]) { r[0] = v; this._dirty = true; } else if (v > r[1]) { r[1] = v; this._dirty = true; }
                 });
-                this._save();
             }
+            this._learn();
+            this._save();
             this._note('seat probe: hall ' + (h.ok ? JSON.stringify(this.hall) : h.reason) + ', motors ' + (m.ok ? JSON.stringify(this.motor) : m.reason) +
                 ', switches ' + (s.ok ? (this.switches.pressed ? 'pressed' : 'not pressed') : s.reason));
         } catch (e) {

@@ -49,9 +49,27 @@ const be16 = (v) => [v >> 8, v & 0xFF];
 const CONFIG = [2, 2, 1, 0].concat(new Array(21).fill(0));                   // fore/aft, height with sensors; backrest motor only
 const INIT = [1, 1, 1, 0, 0, 0, 1, 1, 2, 2].concat(new Array(95).fill(0));
 const hall = (slv, shv) => be16(slv).concat(be16(shv), be16(0), new Array(16).fill(0));
-const MOTOR_OFF = [0, 0, 3, 3, 3, 3, 3, 3, 0, 0, 0];
+// D708: per axis 0 off, 1 plus (forward / up), 2 minus (back / down), 3 not fitted
+const motor = (slv, shv) => [slv, shv, 0, 3, 3, 3, 3, 3, 0, 0, 0];
+const MOTOR_OFF = motor(0, 0);
+const OFF = 0, PLUS = 1, MINUS = 2;
 const SW_NONE = [0, 0, 0, 0, 2, 2].concat(new Array(13).fill(2));
 const SW_SLV_BACK = [0, 1, 0, 0, 2, 2].concat(new Array(13).fill(2));
+const SW_SLV_FWD = [1, 0, 0, 0, 2, 2].concat(new Array(13).fill(2));
+
+/**
+ * A seat that moves under the probe: each step is one poll, { slv, shv } counters and the motor directions the
+ * module reports during it. Returns the probe after the run.
+ */
+async function drive(probe, table, steps) {
+    for (const s of steps) {
+        table[0xD702] = hall(s.slv, s.shv);
+        table[0xD708] = motor(s.ms || OFF, s.mh || OFF);
+        table[0xD712] = s.sw || SW_NONE;
+        await probe.tick();
+    }
+    return probe;
+}
 
 Promise.resolve()
 .then(() => test('parsers read the FAS_G11 layouts', () => {
@@ -60,7 +78,8 @@ Promise.resolve()
     assert.deepStrictEqual(L.parseInit(INIT), { initialised: true, normed: { slv: true, shv: true, lnv: null } });
     assert.deepStrictEqual(L.parseMotor([1, 2, 3]), { slv: 'plus', shv: 'minus', lnv: null });
     assert.deepStrictEqual(L.parseSwitches(SW_NONE), { pressed: false, axes: { slv: false, shv: false, lnv: false } });
-    assert.deepStrictEqual(L.parseSwitches(SW_SLV_BACK).pressed, true);
+    assert.deepStrictEqual(L.parseSwitches(SW_SLV_BACK), { pressed: true, axes: { slv: 'minus', shv: false, lnv: false } });
+    assert.strictEqual(L.parseSwitches(SW_SLV_FWD).axes.slv, 'plus');
 }))
 .then(() => test('only reads of the listed identifiers leave, only to 0x6D', async () => {
     const diag = fakeDiag({ 0xD700: CONFIG });
@@ -106,23 +125,27 @@ Promise.resolve()
     assert.deepStrictEqual(probe.hall, { slv: 30000, shv: 20000, lnv: null });
     assert.strictEqual(probe.switches.pressed, false);
     assert.strictEqual(probe.percent('slv'), null, 'one position is no travel yet');
-    // the seat moved back with its own switch, end to end
-    table[0xD712] = SW_SLV_BACK; table[0xD702] = hall(20000, 20000);
-    await probe.tick();
-    assert.strictEqual(probe.switches.pressed, true);
-    table[0xD712] = SW_NONE; table[0xD702] = hall(40000, 20000);
-    await probe.tick();
+    // ends seen without the module saying which way the motor ran: no share, no direction guessed
+    await drive(probe, table, [{ slv: 20000, shv: 20000 }, { slv: 40000, shv: 20000 }]);
     assert.deepStrictEqual(probe.travel.slv, [20000, 40000]);
-    assert.strictEqual(probe.percent('slv'), 0, 'the counter rises toward the front: the highest is 0 % back');
-    table[0xD702] = hall(25000, 20000);
-    await probe.tick();
-    assert.strictEqual(probe.percent('slv'), 75, '75 % back');
+    assert.strictEqual(probe.risesToward('slv'), null);
+    assert.strictEqual(probe.percent('slv'), null, 'a direction is never assumed');
+    // the seat driven back (MINUS) with its own switch: the counter falls as it goes back
+    await drive(probe, table, [
+        { slv: 39000, shv: 20000, ms: MINUS, sw: SW_SLV_BACK },
+        { slv: 37000, shv: 20000, ms: MINUS, sw: SW_SLV_BACK },
+        { slv: 35000, shv: 20000, ms: MINUS, sw: SW_SLV_BACK },
+    ]);
+    assert.strictEqual(probe.switches.pressed, true);
+    assert.strictEqual(probe.risesToward('slv'), 'front');
+    assert.strictEqual(probe.percent('slv'), 25, '(40000 - 35000) / 20000 back');
     assert.strictEqual(probe.percent('shv'), null, 'height: one position, no travel');
     probe._saveAt = 0; probe._dirty = true; probe._save();
     const again = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, dir);
     assert.deepStrictEqual(again.travel.slv, [20000, 40000], 'the travel survives a restart');
+    assert.strictEqual(again.risesToward('slv'), 'front', 'and so does the direction');
     again.resetTravel();
-    assert.deepStrictEqual(again.travel, {});
+    assert.deepStrictEqual([again.travel, again.rises], [{}, {}]);
     // everything that left: reads to 0x6D of the listed identifiers, nothing else
     assert.ok(diag.sent.length > 0);
     diag.sent.forEach((s) => {
@@ -132,24 +155,57 @@ Promise.resolve()
     });
     assert.strictEqual(diag.sent.filter((s) => s.data[1] === 0x00 && s.data[0] === 0xD7).length, 1, 'the make-up is read once');
 }))
-.then(() => test('the exit position from the G30\'s measured ends (15.11.2026)', async () => {
-    // fore / aft: 33321 fully forward .. 32627 fully back; height: 32473 fully down .. 33217 fully up
-    const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(33321, 32473), 0xD708: MOTOR_OFF, 0xD712: SW_NONE };
+.then(() => test('the G30\'s ends, the counter rising toward the BACK (the live reading on 0.2.3)', async () => {
+    // fore / aft between 32627 and 33321, height between 32473 and 33217 (15.11.2026)
+    const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(32627, 32473), 0xD708: MOTOR_OFF, 0xD712: SW_NONE };
     const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null);
     await probe.tick();
-    assert.strictEqual(probe.exitCounts(0.75), null, 'ends not measured: no target');
-    table[0xD702] = hall(32627, 33217); await probe.tick();          // fully back, fully up
-    assert.ok(probe.measured('slv') && probe.measured('shv'));
-    assert.strictEqual(probe.percent('slv'), 100);
+    assert.strictEqual(probe.exitCounts(0.75), null, 'nothing measured: no target');
+    await drive(probe, table, [                                       // back (MINUS) and up (PLUS), end to end
+        { slv: 32900, shv: 32700, ms: MINUS, mh: PLUS },
+        { slv: 33100, shv: 32950, ms: MINUS, mh: PLUS },
+        { slv: 33321, shv: 33217, ms: MINUS, mh: PLUS },
+    ]);
+    assert.strictEqual(probe.risesToward('slv'), 'back');
+    assert.strictEqual(probe.risesToward('shv'), 'up');
+    assert.strictEqual(probe.percent('slv'), 100, 'fully back reads 100 % back');
     assert.strictEqual(probe.percent('shv'), 100);
-    table[0xD702] = hall(33100, 32900); await probe.tick();          // a driving position: near the front, half up
-    assert.strictEqual(probe.percent('slv'), 32, '(33321 - 33100) / 694 back');
-    assert.deepStrictEqual(probe.exitCounts(0.75), { slv: 32801, shv: 32473 }, '75 % back = 33321 - 0.75 x 694; fully down');
-    assert.deepStrictEqual(probe.exitCounts(1), { slv: 32627, shv: 32473 });
-    table[0xD702] = hall(32700, 32900); await probe.tick();          // already further back than 75 %
-    assert.strictEqual(probe.exitCounts(0.75).slv, 32700, 'never forward of where the seat is');
-    assert.strictEqual(probe.countFor('slv', 0), 33321);
+    await drive(probe, table, [{ slv: 32700, shv: 32900 }]);          // a driving position: near the front, part up
+    assert.strictEqual(probe.percent('slv'), 11, '(32700 - 32627) / 694 back');
+    assert.deepStrictEqual(probe.exitCounts(0.75), { slv: 33148, shv: 32473 }, '75 % back = 32627 + 0.75 x 694; fully down');
+    assert.deepStrictEqual(probe.exitCounts(1), { slv: 33321, shv: 32473 });
+    await drive(probe, table, [{ slv: 33250, shv: 32900 }]);          // already further back than 75 %
+    assert.strictEqual(probe.exitCounts(0.75).slv, 33250, 'never forward of where the seat is');
+    assert.strictEqual(probe.countFor('slv', 0), 32627, 'fully forward');
     assert.strictEqual(probe.fraction('lnv', 32390), null, 'the backrest has no known direction');
+}))
+.then(() => test('the same ends, the counter rising toward the FRONT (the photos): the target mirrors', async () => {
+    const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(33321, 32473), 0xD708: MOTOR_OFF, 0xD712: SW_NONE };
+    const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null);
+    await drive(probe, table, [
+        { slv: 33321, shv: 32473 },
+        { slv: 33000, shv: 32700, ms: MINUS, mh: PLUS },               // back: the counter falls
+        { slv: 32800, shv: 32950, ms: MINUS, mh: PLUS },
+        { slv: 32627, shv: 33217, ms: MINUS, mh: PLUS },
+        { slv: 33100, shv: 32900 },
+    ]);
+    assert.strictEqual(probe.risesToward('slv'), 'front');
+    assert.deepStrictEqual(probe.exitCounts(0.75), { slv: 32801, shv: 32473 }, '75 % back = 33321 - 0.75 x 694');
+}))
+.then(() => test('the direction from the seat\'s switch when the motor state is not read; a contradiction drops it', async () => {
+    const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(32627, 32473), 0xD708: 'nrc', 0xD712: SW_NONE };
+    const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null);
+    await probe.tick();
+    for (const v of [32800, 33000, 33321]) {                         // the back switch held, the counter rising
+        table[0xD702] = hall(v, 32473); table[0xD712] = SW_SLV_BACK; await probe.tick();
+    }
+    assert.strictEqual(probe.motor, null, 'D708 refused');
+    assert.strictEqual(probe.risesToward('slv'), 'back');
+    assert.ok(probe.measured('slv'));
+    // the forward switch held and the counter rising too: that contradicts it; nothing is worked out on it
+    for (const v of [33330, 33340]) { table[0xD702] = hall(v, 32473); table[0xD712] = SW_SLV_FWD; await probe.tick(); }
+    assert.strictEqual(probe.risesToward('slv'), null);
+    assert.strictEqual(probe.percent('slv'), null);
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');
