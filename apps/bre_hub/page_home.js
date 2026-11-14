@@ -94,14 +94,17 @@ function rows(app, parked) {
                 if (fit === 0) value = T('probe.notFitted');
                 else if (fit === 1) value = T('probe.noSensor');
                 else if (fit === 2 && p.hall && p.hall[a] !== null) {
-                    const pct = p.percent(a);
-                    value = String(p.hall[a]) + (pct === null ? '' : ' / ' + pct + ' %');
+                    // fore / aft as a share back (as "Move back to"), height as a share up, once both ends are seen
+                    const pct = p.percent(a), unit = { slv: 'probe.pctBack', shv: 'probe.pctUp' }[a];
+                    value = String(p.hall[a]) + (pct === null || !unit ? '' : ' / ' + T(unit, { pct: pct }));
                 }
             }
             const moving = !!(p && p.motor && (p.motor[a] === 'plus' || p.motor[a] === 'minus'));
             return { key: 'probe-' + a, label: T('axis.' + a), value: value, color: moving ? 'warn' : null };
         };
         const sw = p && p.switches;
+        // where Seat Easy Access would take the seat from here, as the module's counters (nothing moves)
+        const exit = p && p.exitCounts ? p.exitCounts(app.easyEntry.offset) : null;
         return {
             list: [
                 { key: 'probe-back', icon: 'back', label: T('seats.module'), run: () => show(app, 'seat', 'seat-module') },
@@ -111,7 +114,9 @@ function rows(app, parked) {
                     color: sw && sw.pressed ? 'warn' : null },
                 { key: 'probe-reset', label: T('probe.resetTravel'), dim: !p, run: () => { if (p) p.resetTravel(); } },
             ],
-            foot: p && p.state === 'none' ? { text: T('probe.why', { reason: p.reason || '-' }), warn: true } : { text: T('probe.foot') },
+            foot: p && p.state === 'none' ? { text: T('probe.why', { reason: p.reason || '-' }), warn: true }
+                : exit ? { text: T('probe.exit', { pct: Math.round(100 * app.easyEntry.offset), fore: exit.slv, height: exit.shv }) }
+                : { text: T('probe.foot') },
         };
     }
     if (ui.view === 'exhaust') {

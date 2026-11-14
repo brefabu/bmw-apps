@@ -113,6 +113,7 @@ app.seatProbe = {
     state: 'found', reason: null, config: { slv: 2, shv: 2, lnv: 1 }, init: { initialised: true },
     hall: { slv: 30000, shv: 20000, lnv: null }, motor: { slv: 'minus', shv: 'off', lnv: null }, switches: { pressed: true },
     percent: (a) => (a === 'slv' ? 42 : null), resets: 0, resetTravel() { this.resets++; }, tick: () => Promise.resolve(),
+    exitCounts: (offset) => (offset > 0 ? { slv: 32801, shv: 32473 } : null),
 };
 assert.strictEqual(app.ident.model().code, 'G30');
 

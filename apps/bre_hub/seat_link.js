@@ -21,17 +21,22 @@
 const fs = require('fs');
 const path = require('path');
 const { hex, NRC, replyTo } = require('./kit/diag');
+const { exitPosition } = require('./seats_backend');
 
 const FAS = 0x6D;
 const DID = Object.freeze({ CONFIG_HW: 0xD700, HALL: 0xD702, INIT: 0xD704, MOTOR: 0xD708, SWITCHES: 0xD712 });
 const READS = Object.freeze([DID.CONFIG_HW, DID.HALL, DID.INIT, DID.MOTOR, DID.SWITCHES]);
 
-// the axes we show: their index in D700 / D702 (x2) / D708, and their switches' bytes in D712 (+, -)
+// the axes we show: their index in D700 / D702 (x2) / D708, and their switches' bytes in D712 (+, -).
+// up: which way the Hall counter rises, as the app counts the axis (seats_backend.js: fore 0 = fully forward,
+// 1 = fully back; height 0 = fully down, 1 = fully up). Measured on the G30 on 15.11.2026 (docs/07): the counter
+// rises toward the front (32627 back .. 33321 front) and up (32473 down .. 33217 up), as PLUS is "vor, auf".
 const AXES = Object.freeze({
-    slv: { i: 0, sw: [0, 1], norm: [1, 2] },      // fore / aft (Sitzlaengsverstellung)
-    shv: { i: 1, sw: [2, 3], norm: [6, 7] },      // height (Sitzhoehenverstellung)
-    lnv: { i: 2, sw: [4, 5], norm: [8, 9] },      // backrest (Lehnenneigungsverstellung)
+    slv: { i: 0, sw: [0, 1], norm: [1, 2], app: 'fore', rises: 'front' },     // fore / aft (Sitzlaengsverstellung)
+    shv: { i: 1, sw: [2, 3], norm: [6, 7], app: 'height', rises: 'up' },      // height (Sitzhoehenverstellung)
+    lnv: { i: 2, sw: [4, 5], norm: [8, 9], app: 'back', rises: null },        // backrest: not used yet
 });
+const MIN_TRAVEL = 500;          // counts between the ends seen before a position counts as a share of the travel
 const HALL_MIN = 8192, HALL_MAX = 57344;
 const TRAVEL_FILE = 'bre_seat_travel.json';
 
@@ -137,14 +142,47 @@ class SeatProbe {
         try { fs.writeFileSync(this.file, JSON.stringify(this.travel)); } catch (e) { this.log.warn('seat travel: ' + e); }
     }
 
-    /** Forget the measured travel (to measure it again). */
+    /** Forget the measured ends (to measure them again). */
     resetTravel() { this.travel = {}; this._dirty = true; this._saveAt = 0; this._save(); }
 
-    /** Where an axis is in its measured travel, 0..100, or null (no position, or less than 500 counts measured). */
+    /** Both ends of the axis seen (at least MIN_TRAVEL apart) and its direction known. */
+    measured(a) {
+        const r = this.travel[a];
+        return !!(r && AXES[a] && AXES[a].rises && r[1] - r[0] >= MIN_TRAVEL);
+    }
+
+    /** A counter as the app counts the axis: fore 0 front .. 1 back, height 0 down .. 1 up; null unmeasured. */
+    fraction(a, count) {
+        const r = this.travel[a];
+        if (!this.measured(a) || count === null || count === undefined) return null;
+        const up = (count - r[0]) / (r[1] - r[0]);
+        return Math.max(0, Math.min(1, AXES[a].rises === 'front' ? 1 - up : up));
+    }
+
+    /** The counter for a fraction of the axis (the reverse of fraction()); null unmeasured. */
+    countFor(a, f) {
+        const r = this.travel[a];
+        if (!this.measured(a)) return null;
+        const up = AXES[a].rises === 'front' ? 1 - f : f;
+        return Math.round(r[0] + Math.max(0, Math.min(1, up)) * (r[1] - r[0]));
+    }
+
+    /** Where the axis is now, 0..100 as the app counts it (fore: % back; height: % up), or null. */
     percent(a) {
-        const h = this.hall && this.hall[a], r = this.travel[a];
-        if (h === null || h === undefined || !r || r[1] - r[0] < 500) return null;
-        return Math.round(100 * (h - r[0]) / (r[1] - r[0]));
+        const f = this.fraction(a, this.hall && this.hall[a]);
+        return f === null ? null : Math.round(100 * f);
+    }
+
+    /**
+     * Seat Easy Access's exit position for the seat as it is now, as counters: { slv, shv }, or null while the
+     * fore / aft and height ends are not measured. The same rule as the move (seats_backend.exitPosition): back to
+     * offset (0..1) of the travel, never forward of where it is, fully down. Read only: nothing moves.
+     */
+    exitCounts(offset) {
+        const fore = this.fraction('slv', this.hall && this.hall.slv), height = this.fraction('shv', this.hall && this.hall.shv);
+        if (fore === null || height === null) return null;
+        const exit = exitPosition({ fore: fore, height: height, back: null }, offset);
+        return { slv: this.countFor('slv', exit.fore), shv: this.countFor('shv', exit.height) };
     }
 
     async tick() {
@@ -195,4 +233,4 @@ class SeatProbe {
     _note(line) { if (line !== this._last) { this._last = line; this.log.info(line); } }
 }
 
-module.exports = { SeatLink, SeatProbe, FAS, DID, READS, AXES, parseConfig, parseHall, parseInit, parseMotor, parseSwitches };
+module.exports = { SeatLink, SeatProbe, FAS, DID, READS, AXES, MIN_TRAVEL, parseConfig, parseHall, parseInit, parseMotor, parseSwitches };

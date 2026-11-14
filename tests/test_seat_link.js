@@ -113,10 +113,11 @@ Promise.resolve()
     table[0xD712] = SW_NONE; table[0xD702] = hall(40000, 20000);
     await probe.tick();
     assert.deepStrictEqual(probe.travel.slv, [20000, 40000]);
-    assert.strictEqual(probe.percent('slv'), 100);
+    assert.strictEqual(probe.percent('slv'), 0, 'the counter rises toward the front: the highest is 0 % back');
     table[0xD702] = hall(25000, 20000);
     await probe.tick();
-    assert.strictEqual(probe.percent('slv'), 25);
+    assert.strictEqual(probe.percent('slv'), 75, '75 % back');
+    assert.strictEqual(probe.percent('shv'), null, 'height: one position, no travel');
     probe._saveAt = 0; probe._dirty = true; probe._save();
     const again = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, dir);
     assert.deepStrictEqual(again.travel.slv, [20000, 40000], 'the travel survives a restart');
@@ -130,6 +131,25 @@ Promise.resolve()
         assert.ok(L.READS.indexOf((s.data[0] << 8) | s.data[1]) >= 0);
     });
     assert.strictEqual(diag.sent.filter((s) => s.data[1] === 0x00 && s.data[0] === 0xD7).length, 1, 'the make-up is read once');
+}))
+.then(() => test('the exit position from the G30\'s measured ends (15.11.2026)', async () => {
+    // fore / aft: 33321 fully forward .. 32627 fully back; height: 32473 fully down .. 33217 fully up
+    const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(33321, 32473), 0xD708: MOTOR_OFF, 0xD712: SW_NONE };
+    const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null);
+    await probe.tick();
+    assert.strictEqual(probe.exitCounts(0.75), null, 'ends not measured: no target');
+    table[0xD702] = hall(32627, 33217); await probe.tick();          // fully back, fully up
+    assert.ok(probe.measured('slv') && probe.measured('shv'));
+    assert.strictEqual(probe.percent('slv'), 100);
+    assert.strictEqual(probe.percent('shv'), 100);
+    table[0xD702] = hall(33100, 32900); await probe.tick();          // a driving position: near the front, half up
+    assert.strictEqual(probe.percent('slv'), 32, '(33321 - 33100) / 694 back');
+    assert.deepStrictEqual(probe.exitCounts(0.75), { slv: 32801, shv: 32473 }, '75 % back = 33321 - 0.75 x 694; fully down');
+    assert.deepStrictEqual(probe.exitCounts(1), { slv: 32627, shv: 32473 });
+    table[0xD702] = hall(32700, 32900); await probe.tick();          // already further back than 75 %
+    assert.strictEqual(probe.exitCounts(0.75).slv, 32700, 'never forward of where the seat is');
+    assert.strictEqual(probe.countFor('slv', 0), 33321);
+    assert.strictEqual(probe.fraction('lnv', 32390), null, 'the backrest has no known direction');
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');
