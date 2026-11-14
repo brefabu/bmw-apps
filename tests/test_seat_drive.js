@@ -69,8 +69,12 @@ function fakeModule(o) {
     };
     m.diag = {
         get quiet() { return m.quiet; }, set quiet(v) { m.quiet = v; },
-        async physical(target, sid, data, timeoutMs, accept) {
+        async physical(target, sid, data, timeoutMs, accept, opts) {
             m.sent.push({ target: target, sid: sid, data: data.slice() });
+            // while a move runs, its reads never wait on tries again
+            if (sid === 0x22 && m.motor && (m.motor.slv !== 'stop' || m.motor.shv !== 'stop')) {
+                assert.ok(opts && opts.maxRetries === 0 && timeoutMs <= 600, 'a quick read while moving');
+            }
             const reply = answer(sid, data);
             assert.ok(!accept || accept(reply), 'the reply matches its request');
             return reply;

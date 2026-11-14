@@ -44,6 +44,10 @@ const AXES = Object.freeze({
     lnv: { i: 2, sw: [4, 5], norm: [8, 9], plus: null, minus: null, toward: null },           // backrest: not used yet
 });
 const MIN_TRAVEL = 500;          // counts between the ends seen before a position counts as a share of the travel
+const HALL_TRIES = 3;            // a position read that fails is tried again this many times in one poll
+const HALL_PAUSE_MS = 150;
+const STALE_MS = 5000;           // the last position read stands this long when reads fail (the seat did not move:
+                                 // a move reads its own position before and while it runs)
 const MIN_STEP = 3;              // counts a poll must move for a direction sample
 const VOTES = 2;                 // agreeing samples (and twice the disagreeing ones) to learn a direction
 const HALL_MIN = 8192, HALL_MAX = 57344;
@@ -99,14 +103,19 @@ class SeatLink {
 
     get available() { return !!(this.link && this.link.available && this.link.diag); }
 
-    /** One of READS from the seat module: { ok, data[] } or { ok: false, nrc, reason }. Never throws. */
-    async read(did, timeoutMs) {
+    /**
+     * One of READS from the seat module: { ok, data[] } or { ok: false, nrc, reason }. Never throws.
+     * quick: no tries again and a short wait (a move: a late position is worse than none, it stops the move).
+     */
+    async read(did, timeoutMs, quick) {
         if (READS.indexOf(did) < 0) return { ok: false, nrc: null, reason: 'not a read BRE Hub makes' };
         if (!this.available) return { ok: false, nrc: null, reason: 'no diagnostic link' };
         const diag = this.link.diag, req = [did >> 8, did & 0xFF], quiet = diag.quiet;
         diag.quiet = true;                      // polled while the probe is open: our own log lines say what matters
         try {
-            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || 1500, replyTo(0x22, req), { maxRetries: 1 });
+            // the transport turns a request away while it is busy with the one before: a few quick tries
+            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || (quick ? 600 : 2000), replyTo(0x22, req),
+                quick ? { maxRetries: 0, callTimeoutMs: 1000 } : { maxRetries: 3, retryBaseMs: 200 });
             if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
             if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
             if (reply[0] === 0x62) return { ok: true, data: reply.slice(3) };
@@ -124,18 +133,25 @@ class SeatLink {
  * motors and the switches); main.js calls it about once a second while the probe's list is open.
  */
 class SeatProbe {
-    constructor(seatLink, log, dataDir) {
+    /** o (optional): { sleep(ms) } for the tests. */
+    constructor(seatLink, log, dataDir, o) {
         this.seat = seatLink; this.log = log;
         this.file = dataDir ? path.join(dataDir, TRAVEL_FILE) : null;
+        this.wait = (o && o.sleep) || ((ms) => new Promise((r) => setTimeout(r, ms)));
         this.state = 'idle';            // idle | reading | found | none | nolink
         this.reason = null;             // why 'none': the module's refusal or 'timeout'
         this.config = null; this.init = null; this.hall = null; this.motor = null; this.switches = null;
+        this.hallAt = 0;                // when the position was last read
+        this.hallError = null;          // why the last position read failed (shown on the page), or null
         const saved = this._load();
         this.travel = saved.travel;     // { slv: [min, max], ... }: the lowest and highest counter seen
         this.rises = saved.rises;       // { slv: 'plus' | 'minus' }: the motor direction that makes the counter rise
-        this._votes = {}; this._prev = null;
-        this.busy = false; this._saveAt = 0; this._dirty = false; this._last = '';
+        this._votes = {}; this._prev = null; this._tick = null;
+        this._saveAt = 0; this._dirty = false; this._last = '';
     }
+
+    /** A poll is running. */
+    get busy() { return !!this._tick; }
 
     _load() {
         const out = { travel: {}, rises: {} };
@@ -239,49 +255,69 @@ class SeatProbe {
         return { slv: this.countFor('slv', exit.fore), shv: this.countFor('shv', exit.height) };
     }
 
-    async tick() {
-        if (this.busy) return;
-        this.busy = true;
-        try {
-            if (!this.seat.available) { this.state = 'nolink'; this._note('seat probe: no diagnostic link'); return; }
-            if (!this.config) {
-                if (this.state !== 'found') this.state = 'reading';
-                const c = await this.seat.read(DID.CONFIG_HW);
-                if (!c.ok) {
-                    this.state = 'none'; this.reason = c.reason;
-                    this._note('seat probe: the driver\'s seat module (0x6D) did not answer D700: ' + c.reason);
-                    return;
-                }
-                this.config = parseConfig(c.data);
-                const i = await this.seat.read(DID.INIT);
-                this.init = i.ok ? parseInit(i.data) : null;
-                this.state = 'found'; this.reason = null;
-                this.log.info('seat probe: module found; motors ' + JSON.stringify(this.config) + ' (2 = with a position sensor); ' +
-                    'initialised ' + (this.init ? JSON.stringify(this.init) : 'unread: ' + i.reason));
-            }
-            const h = await this.seat.read(DID.HALL);
-            this.hall = h.ok ? parseHall(h.data) : null;
-            const m = await this.seat.read(DID.MOTOR);
-            this.motor = m.ok ? parseMotor(m.data) : null;
-            const s = await this.seat.read(DID.SWITCHES);
-            this.switches = s.ok ? parseSwitches(s.data) : null;
-            if (this.hall) {
-                Object.keys(AXES).forEach((a) => {
-                    const v = this.hall[a];
-                    if (v === null) return;
-                    const r = this.travel[a];
-                    if (!r) { this.travel[a] = [v, v]; this._dirty = true; } else if (v < r[0]) { r[0] = v; this._dirty = true; } else if (v > r[1]) { r[1] = v; this._dirty = true; }
-                });
-            }
-            this._learn();
-            this._save();
-            this._note('seat probe: hall ' + (h.ok ? JSON.stringify(this.hall) : h.reason) + ', motors ' + (m.ok ? JSON.stringify(this.motor) : m.reason) +
-                ', switches ' + (s.ok ? (this.switches.pressed ? 'pressed' : 'not pressed') : s.reason));
-        } catch (e) {
-            this.log.warn('seat probe: ' + e);
-        } finally {
-            this.busy = false;
+    /**
+     * One poll. Called while one runs, it waits for that one (a move about to be worked out gets a finished read,
+     * never the state of a poll halfway through).
+     */
+    tick() {
+        if (this._tick) return this._tick;
+        const done = () => { this._tick = null; };
+        this._tick = this._poll().then(done, (e) => { done(); this.log.warn('seat probe: ' + e); });
+        return this._tick;
+    }
+
+    /** The position, tried HALL_TRIES times; a failure keeps the last one for STALE_MS. Resolves true when read. */
+    async _readHall() {
+        let h = null;
+        for (let i = 0; i < HALL_TRIES; i++) {
+            if (i) await this.wait(HALL_PAUSE_MS);
+            h = await this.seat.read(DID.HALL);
+            if (h.ok) break;
         }
+        if (h.ok) {
+            this.hall = parseHall(h.data); this.hallAt = Date.now(); this.hallError = null;
+            return true;
+        }
+        this.hallError = h.reason || 'not read';
+        if (Date.now() - this.hallAt > STALE_MS) this.hall = null;
+        return false;
+    }
+
+    async _poll() {
+        if (!this.seat.available) { this.state = 'nolink'; this._note('seat probe: no diagnostic link'); return; }
+        if (!this.config) {
+            if (this.state !== 'found') this.state = 'reading';
+            const c = await this.seat.read(DID.CONFIG_HW);
+            if (!c.ok) {
+                this.state = 'none'; this.reason = c.reason;
+                this._note('seat probe: the driver\'s seat module (0x6D) did not answer D700: ' + c.reason);
+                return;
+            }
+            this.config = parseConfig(c.data);
+            const i = await this.seat.read(DID.INIT);
+            this.init = i.ok ? parseInit(i.data) : null;
+            this.state = 'found'; this.reason = null;
+            this.log.info('seat probe: module found; motors ' + JSON.stringify(this.config) + ' (2 = with a position sensor); ' +
+                'initialised ' + (this.init ? JSON.stringify(this.init) : 'unread: ' + i.reason));
+        }
+        const fresh = await this._readHall();
+        const m = await this.seat.read(DID.MOTOR);
+        this.motor = m.ok ? parseMotor(m.data) : null;
+        const s = await this.seat.read(DID.SWITCHES);
+        this.switches = s.ok ? parseSwitches(s.data) : null;
+        // the ends and the directions only from a position read in this poll
+        if (fresh) {
+            Object.keys(AXES).forEach((a) => {
+                const v = this.hall[a];
+                if (v === null) return;
+                const r = this.travel[a];
+                if (!r) { this.travel[a] = [v, v]; this._dirty = true; } else if (v < r[0]) { r[0] = v; this._dirty = true; } else if (v > r[1]) { r[1] = v; this._dirty = true; }
+            });
+            this._learn();
+        }
+        this._save();
+        this._note('seat probe: hall ' + (fresh ? JSON.stringify(this.hall) : 'not read: ' + this.hallError) + ', motors ' + (m.ok ? JSON.stringify(this.motor) : m.reason) +
+            ', switches ' + (s.ok ? (this.switches.pressed ? 'pressed' : 'not pressed') : s.reason));
     }
 
     /** Log a line when it differs from the last one (the probe polls: no line per poll). */

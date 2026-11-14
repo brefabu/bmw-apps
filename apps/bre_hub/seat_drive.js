@@ -124,8 +124,9 @@ class SeatMover {
     /** Stop what runs: the move sees it within one poll and sends STOP. */
     stop(reason) { if (this.busy) { this.aborted = true; this.reason = reason || 'stopped'; } }
 
+    /** The position, read quickly (no tries again: a late position would let the motor run on unseen). */
     async _read() {
-        const h = await this.seat.read(DID.HALL);
+        const h = await this.seat.read(DID.HALL, null, true);
         return h.ok ? parseHall(h.data) : null;
     }
 
@@ -160,7 +161,7 @@ class SeatMover {
                 }
                 misses = 0;
                 if ((++polls) % 2 === 0) {
-                    const s = await this.seat.read(DID.SWITCHES);
+                    const s = await this.seat.read(DID.SWITCHES, null, true);
                     if (s.ok && parseSwitches(s.data).pressed) { this.reason = 'a seat switch was touched'; return false; }
                 }
                 if (up ? v < start - WRONG_WAY : v > start + WRONG_WAY) { this.reason = 'went the wrong way'; return false; }

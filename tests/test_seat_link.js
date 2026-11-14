@@ -34,7 +34,7 @@ function fakeDiag(table) {
         async physical(target, sid, data, timeoutMs, accept) {
             d.sent.push({ target: target, sid: sid, data: data.slice(), quietWhileSent: d.quiet });
             const did = (data[0] << 8) | data[1];
-            const a = table[did];
+            const a = typeof table[did] === 'function' ? table[did]() : table[did];
             if (a === undefined || a === null) return null;                  // timeout
             const reply = a === 'nrc' ? [0x7F, 0x22, 0x31] : [0x62, data[0], data[1]].concat(a);
             assert.ok(!accept || accept(reply), 'the reply matches its request');
@@ -206,6 +206,42 @@ Promise.resolve()
     for (const v of [33330, 33340]) { table[0xD702] = hall(v, 32473); table[0xD712] = SW_SLV_FWD; await probe.tick(); }
     assert.strictEqual(probe.risesToward('slv'), null);
     assert.strictEqual(probe.percent('slv'), null);
+}))
+.then(() => test('a position read that fails: tried again in the same poll; then the last one stands a while, with why', async () => {
+    let fails = 2;
+    const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD708: MOTOR_OFF, 0xD712: SW_NONE,
+        0xD702: () => (fails-- > 0 ? null : hall(33068, 32523)) };
+    const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null, { sleep: () => Promise.resolve() });
+    await probe.tick();
+    assert.deepStrictEqual(probe.hall, { slv: 33068, shv: 32523, lnv: null }, 'read on the third try');
+    assert.strictEqual(probe.hallError, null);
+    table[0xD702] = null;                                             // the module stops answering D702
+    await probe.tick();
+    assert.strictEqual(probe.hallError, 'timeout', 'why is kept for the page');
+    assert.deepStrictEqual(probe.hall, { slv: 33068, shv: 32523, lnv: null }, 'the last position stands a while');
+    probe.hallAt -= 6000;                                             // ... but not for long
+    await probe.tick();
+    assert.strictEqual(probe.hall, null);
+    table[0xD702] = hall(33000, 32600);
+    await probe.tick();
+    assert.strictEqual(probe.hallError, null);
+    assert.strictEqual(probe.hall.slv, 33000);
+}))
+.then(() => test('a poll asked for while one runs waits for that one', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const diag = fakeDiag({ 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(33068, 32523), 0xD708: MOTOR_OFF, 0xD712: SW_NONE });
+    const physical = diag.physical;
+    diag.physical = async function () { await gate; return physical.apply(this, arguments); };
+    const probe = new L.SeatProbe(new L.SeatLink(linkOf(diag), quiet), quiet, null);
+    const first = probe.tick();
+    const second = probe.tick();
+    assert.strictEqual(first, second, 'the same poll');
+    assert.strictEqual(probe.busy, true);
+    release();
+    await second;
+    assert.ok(probe.hall && probe.hall.slv === 33068, 'a finished read, not a poll halfway through');
+    assert.strictEqual(probe.busy, false);
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');

@@ -48,13 +48,19 @@ function seatFoot(app, ee, mode) {
     // a save just made says so for a few seconds
     const last = ee.events && ee.events[0];
     if (last && Date.now() - last.t < 5000 && (last.key === 'ee.saved' || last.key === 'ee.noPosition')) {
-        return { text: T(last.key), warn: last.key === 'ee.noPosition' };
+        return { text: noPositionText(app, last.key), warn: last.key === 'ee.noPosition' };
     }
     if (mode !== 'armed') return { text: T('state.' + ee.state) + ' · ' + T('seats.demo') };
     const why = app.seats && app.seats.reason ? app.seats.reason() : null;
     if (ee.state === 'STOPPED' && why) return { text: T('seats.stoppedWhy', { reason: why }), warn: true };
-    if (ee.events[0] && ee.events[0].key === 'ee.noPosition' && ee.state === 'IDLE') return { text: T('ee.noPosition'), warn: true };
+    if (ee.events[0] && ee.events[0].key === 'ee.noPosition' && ee.state === 'IDLE') return { text: noPositionText(app, 'ee.noPosition'), warn: true };
     return { text: T('state.' + ee.state) + ' · ' + T('seats.armed') };
+}
+
+/** "No seat position", with why when the position read failed (the seat probe's reason). */
+function noPositionText(app, key) {
+    const why = key === 'ee.noPosition' && app.seatProbe && app.seatProbe.hallError;
+    return why ? T('probe.hallFail', { reason: why }) : T(key);
 }
 
 /** The seat probe's state as a row value (seat_link.js). */
@@ -132,7 +138,8 @@ function rows(app, parked) {
                 { key: 'probe-reset', label: T('probe.resetTravel'), dim: !p, run: () => { if (p) p.resetTravel(); } },
             ],
             foot: p && p.state === 'none' ? { text: T('probe.why', { reason: p.reason || '-' }), warn: true }
-                : exit ? { text: T('probe.exit', { pct: Math.round(100 * app.easyEntry.offset), fore: exit.slv, height: exit.shv }) }
+                : p && p.hallError ? { text: T('probe.hallFail', { reason: p.hallError }), warn: true }
+                : exit ?{ text: T('probe.exit', { pct: Math.round(100 * app.easyEntry.offset), fore: exit.slv, height: exit.shv }) }
                 : { text: T('probe.foot') },
         };
     }

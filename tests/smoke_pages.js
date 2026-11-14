@@ -226,6 +226,9 @@ assert.strictEqual(app.seatProbe.resets, 1);
 app.seatProbe.state = 'none'; app.seatProbe.reason = 'timeout';
 drawPage(true, D0);
 app.seatProbe.state = 'found';
+app.seatProbe.hallError = 'timeout';                     // a position read failed: the reason under the list
+drawPage(true, D0);
+app.seatProbe.hallError = null;
 drawPage(true, D0, 'probe-back');
 assert.strictEqual(home.ui.view, 'seat');
 // armed (the real seat): the list says so, a stop shows why; turning it off from the page never arms it again
