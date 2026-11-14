@@ -1,8 +1,8 @@
 {
   "id": "bre_hub",
   "title": "My car",
-  "description": "My car (BRE Hub): your car on one page, in the style of iDrive 7. Seat Easy Access (demo) and the exhaust flap: open, closed, auto or by the driving mode, held against the engine controller's timeout. The exhaust flap ships disarmed (simulated)",
-  "version": "0.2.4",
+  "description": "My car (BRE Hub): your car on one page, in the style of iDrive 7. Seat Easy Access: the driver's seat back and down when the car is switched off, back when it starts (parked only). The exhaust flap: open, closed, auto or by the driving mode, held against the engine controller's timeout. Both ship disarmed",
+  "version": "0.3.0",
   "vendor": "brefabu",
   "loggingId": "BRE1",
   "iconGlyph": "BRE",
@@ -21,6 +21,14 @@
     },
     "de.bmw.infotainment.drivingexcitement.FES": {
       "statusFESVehicleDynamicSwitchHMI": "rs"
+    },
+    "de.bmw.infrastructure.VehicleInformation": {
+      "statusGearboxDrive": "s",
+      "DataPowerTrain2": "s"
+    },
+    "de.bmw.infrastructure.VehicleCondition": {
+      "_optional": "the car started / switched off: Seat Easy Access's triggers",
+      "VehicleCondition": "s"
     }
   },
   "screens": [
@@ -48,7 +56,8 @@
       "options": [["mineral", "Mineral Grey"], ["bernina", "Bernina Grey"], ["glacier", "Glacier Silver"],
         ["alpine", "Alpine White"], ["carbon", "Carbon Black"], ["brooklyn", "Brooklyn Grey"]] },
     { "key": "easyEntry", "label": "Seat Easy Access", "type": "choice", "default": "demo",
-      "options": [["off", "Off"], ["demo", "On (demo: the real seat does not move)"]] },
+      "options": [["off", "Off"], ["demo", "On (demo: the real seat does not move)"],
+        ["armed", "Armed (moves the real seat, parked only)"]] },
     { "key": "seatOffset", "label": "Seat: move back to", "type": "choice", "default": "75",
       "options": [["50", "50 %"], ["55", "55 %"], ["60", "60 %"], ["65", "65 %"], ["70", "70 %"], ["75", "75 %"],
         ["80", "80 %"], ["85", "85 %"], ["90", "90 %"], ["95", "95 %"], ["100", "100 %"]] },

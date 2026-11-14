@@ -13,9 +13,10 @@
  *   stop(seat)               stop at once
  *
  * Backends:
- *   'demo'  simulated seats (this file). Touches nothing in the car. The only one in the template.
- *   next:   'comfort' (a client for IterioDev's separately installed Comfort service, personal use only)
- *           or 'bre' (our own root tool bre-comfort, written from the SGBD job tables). See docs/07.
+ *   'demo'   simulated seats (this file). Touches nothing in the car.
+ *   'armed'  the real driver's seat: seat_drive.js's RealBackend, through the seat module's own job (2E D708),
+ *            from the app (no root tool). main.js picks the backend by the "easyEntry" setting. See docs/07.
+ * A backend may have refresh() (a fresh position before a move is worked out).
  */
 const fs = require('fs');
 const path = require('path');
@@ -118,6 +119,18 @@ class Positions {
     set(seat, name, pos) {
         if (!this.data[seat]) this.data[seat] = {};
         this.data[seat][name] = { fore: pos.fore, height: pos.height, back: pos.back };
+        this._write();
+    }
+    /** A yes / no kept with the positions (the driver's seat let out, waiting for the car to start). */
+    flag(seat, name) { return !!(this.data[seat] && this.data[seat].flags && this.data[seat].flags[name]); }
+    setFlag(seat, name, on) {
+        if (!this.data[seat]) this.data[seat] = {};
+        const f = this.data[seat].flags || (this.data[seat].flags = {});
+        if (!!f[name] === !!on) return;
+        f[name] = !!on;
+        this._write();
+    }
+    _write() {
         try { fs.writeFileSync(this.file, JSON.stringify(this.data)); } catch (e) { if (this.log) this.log.warn('seats: save failed ' + e); }
     }
 }
@@ -134,19 +147,38 @@ function exitPosition(pos, offset) {
 
 /**
  * The driver's Seat Easy Access (docs/07):
- *   IDLE --(door open, ignition off, parked)--> MOVING_OUT --> OUT --(door shut, ignition on)--> MOVING_IN --> IDLE
- *   any state --(moving, a manual move, a failed move)--> STOPPED, which goes back to IDLE on the next ignition on
+ *   IDLE --(the car switched off, parked)--> MOVING_OUT --> OUT --(the car started, parked)--> MOVING_IN --> IDLE
+ *   any state --(moving, a manual move, a failed move)--> STOPPED, which goes back to IDLE on the next start
  *   (or reset()).
- * Out is exitPosition(where the seat is, this.offset); in is where the seat was. Inputs come from the car
- * (onCar) or, in the demo, from the page's menu.
+ * Out is exitPosition(where the seat is, this.offset); in is where the seat was. The real triggers are
+ * carStopped() / carStarted() (main.js, from the vehicle state); onCar() is the page's demo (door and ignition).
+ * OUT is kept with the positions, so a restart of the app between switching off and starting still brings the
+ * seat back.
  */
 class EasyEntry {
     constructor(backend, positions, log) {
         this.backend = backend; this.positions = positions; this.log = log;
         this.offset = 0.75;                        // how far back the seat goes (setOffset)
-        this.state = 'IDLE';
+        this.state = positions && positions.flag && positions.flag('driver', 'out') && positions.get('driver', 'drive') ? 'OUT' : 'IDLE';
         this.events = [];                          // the last few events, shown on the page; never written to disk
         this.car = { doorOpen: false, ignition: true, parked: true };
+    }
+    _set(state) {
+        this.state = state;
+        if (this.positions && this.positions.setFlag) this.positions.setFlag('driver', 'out', state === 'OUT');
+    }
+    /** The car was switched off (the vehicle state left drive-ready): the seat out of the way, if parked. */
+    carStopped(mode, parked) {
+        if (!this.enabled(mode) || this.state !== 'IDLE' || !parked) return false;
+        this.goOut();
+        return true;
+    }
+    /** The car was started (drive-ready): back to the driving position if the seat was let out, if parked. */
+    carStarted(mode, parked) {
+        if (this.state === 'STOPPED') { this._set('IDLE'); this.note('ee.ready'); return false; }
+        if (!this.enabled(mode) || this.state !== 'OUT' || !parked) return false;
+        this.goIn();
+        return true;
     }
     /** key: a bre_text key (ee.*), shown translated on the page. */
     note(key) {
@@ -162,13 +194,13 @@ class EasyEntry {
         const c = this.car;
         if (!c.parked && (this.state === 'MOVING_OUT' || this.state === 'MOVING_IN')) {
             this.backend.stop('driver');
-            this.state = 'STOPPED'; this.note('ee.stoppedMoved');
+            this._set('STOPPED'); this.note('ee.stoppedMoved');
             return;
         }
         if (!this.enabled(mode)) return;
         if (this.state === 'IDLE' && c.doorOpen && !was.doorOpen && !c.ignition && c.parked) this.goOut();
         else if (this.state === 'OUT' && !c.doorOpen && c.ignition && (was.doorOpen || !was.ignition)) this.goIn();
-        else if (this.state === 'STOPPED' && c.ignition && !was.ignition) { this.state = 'IDLE'; this.note('ee.ready'); }
+        else if (this.state === 'STOPPED' && c.ignition && !was.ignition) { this._set('IDLE'); this.note('ee.ready'); }
     }
     /** percent: 0..100 of the rail's travel (the "seatOffset" setting). */
     setOffset(percent) {
@@ -177,39 +209,45 @@ class EasyEntry {
     }
     /** STOPPED back to IDLE (the menu's "Ready again"). */
     reset() {
-        if (this.state === 'STOPPED') { this.state = 'IDLE'; this.note('ee.ready'); }
+        if (this.state === 'STOPPED') { this._set('IDLE'); this.note('ee.ready'); }
     }
     goOut() {
-        // the driving position to come back to is where the seat is now
-        const now = this.backend.status().seats.driver.pos;
-        this.positions.set('driver', 'drive', now);
-        const exit = exitPosition(now, this.offset);
         this.state = 'MOVING_OUT'; this.note('ee.movingOut');
-        this.backend.goTo('driver', exit).then((ok) => {
-            if (this.state !== 'MOVING_OUT') return;
-            this.state = ok ? 'OUT' : 'STOPPED'; this.note(ok ? 'ee.atExit' : 'ee.notFinished');
+        // a fresh position first (the real seat: read from its module), then where the seat is now is the
+        // driving position to come back to
+        return Promise.resolve(this.backend.refresh ? this.backend.refresh() : null).catch(() => null).then(() => {
+            if (this.state !== 'MOVING_OUT') return null;
+            const now = this.backend.status().seats.driver.pos;
+            if (!isFinite(now.fore) || !isFinite(now.height) || now.fore === null || now.height === null) {
+                this._set('IDLE'); this.note('ee.noPosition');
+                return null;
+            }
+            this.positions.set('driver', 'drive', now);
+            return this.backend.goTo('driver', exitPosition(now, this.offset)).then((ok) => {
+                if (this.state !== 'MOVING_OUT') return;
+                this._set(ok ? 'OUT' : 'STOPPED'); this.note(ok ? 'ee.atExit' : 'ee.notFinished');
+            });
         });
     }
     goIn() {
         const drive = this.positions.get('driver', 'drive');
-        if (!drive) { this.state = 'IDLE'; return; }
+        if (!drive) { this._set('IDLE'); return Promise.resolve(); }
         this.state = 'MOVING_IN'; this.note('ee.movingIn');
-        this.backend.goTo('driver', drive).then((ok) => {
+        return Promise.resolve(this.backend.goTo('driver', drive)).then((ok) => {
             if (this.state !== 'MOVING_IN') return;
-            this.state = ok ? 'IDLE' : 'STOPPED'; this.note(ok ? 'ee.atDrive' : 'ee.notFinished');
+            this._set(ok ? 'IDLE' : 'STOPPED'); this.note(ok ? 'ee.atDrive' : 'ee.notFinished');
         });
     }
     /** A manual move or Stop on the page cancels whatever Easy Entry was doing. */
     manual() {
         if (this.state === 'MOVING_OUT' || this.state === 'MOVING_IN') {
-            this.backend.stop('driver'); this.state = 'STOPPED'; this.note('ee.manual');
+            this.backend.stop('driver'); this._set('STOPPED'); this.note('ee.manual');
         }
     }
 }
 
-/** The backend for a mode: only 'demo' exists yet; 'armed' falls back to demo and says so. */
+/** The demo backend ('armed', the real seat, is seat_drive.js's RealBackend: main.js picks it by the setting). */
 function createBackend(mode, log) {
-    if (mode === 'armed' && log) log.warn('seats: no real backend yet (docs/07), using the demo');
     return new DemoBackend(log);
 }
 

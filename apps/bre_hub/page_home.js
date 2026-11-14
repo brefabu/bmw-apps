@@ -43,6 +43,15 @@ function stepOffset(app, d) {
     const n = OFFSETS[Math.max(0, Math.min(OFFSETS.length - 1, (i < 0 ? OFFSETS.indexOf(75) : i) + d))];
     app.settings.set('seatOffset', String(n));
 }
+/** The line under the seat list: the state, demo or armed, and why the real seat stopped. */
+function seatFoot(app, ee, mode) {
+    if (mode !== 'armed') return { text: T('state.' + ee.state) + ' · ' + T('seats.demo') };
+    const why = app.seats && app.seats.reason ? app.seats.reason() : null;
+    if (ee.state === 'STOPPED' && why) return { text: T('seats.stoppedWhy', { reason: why }), warn: true };
+    if (ee.events[0] && ee.events[0].key === 'ee.noPosition' && ee.state === 'IDLE') return { text: T('ee.noPosition'), warn: true };
+    return { text: T('state.' + ee.state) + ' · ' + T('seats.armed') };
+}
+
 /** The seat probe's state as a row value (seat_link.js). */
 function probeState(p) {
     if (!p || p.state === 'idle') return '-';
@@ -81,7 +90,7 @@ function rows(app, parked) {
                 { key: 'seat-module', label: T('seats.module'), value: probeState(app.seatProbe), next: true,
                     run: () => { show(app, 'seatinfo', 'probe-back'); if (app.seatProbe) app.seatProbe.tick().catch(() => {}); } },
             ],
-            foot: !parked ? { text: T('seats.parkedOnly'), warn: true } : on ? { text: T('state.' + ee.state) + ' · ' + T('seats.demo') } : null,
+            foot: !parked ? { text: T('seats.parkedOnly'), warn: true } : !on ? null : seatFoot(app, ee, mode),
         };
     }
     if (ui.view === 'seatinfo') {
@@ -161,7 +170,8 @@ function rows(app, parked) {
     }
     return {
         list: [
-            { key: 'main-seat', icon: 'seat', label: T('menu.seat'), value: T(on ? 'on' : 'off'), next: true, run: () => show(app, 'seat', 'seat-on') },
+            { key: 'main-seat', icon: 'seat', label: T('menu.seat'), value: T(mode === 'armed' ? 'seats.armedShort' : on ? 'on' : 'off'), next: true,
+                run: () => show(app, 'seat', 'seat-on') },
             { key: 'main-exhaust', icon: 'exhaust', label: T('menu.exhaust'), value: T(FLAP_TEXT[ex.selected] || 'ex.auto'), next: true,
                 run: () => show(app, 'exhaust', 'ex-open') },
             { key: 'main-paint', icon: 'paint', label: T('menu.paint'), value: Art.paintOf(s.get('paint')).name, next: true,
@@ -233,7 +243,9 @@ function draw(cv, t, app, d) {
         const w = Math.min(1000, aw - 220);
         car = Art.draw(cv, t, {
             x: ax + Math.round((aw - w) / 2) - 12, groundY: groundY, w: w, shape: model.shape, paint: paintId,
-            bg: t.bg, seat: { fore: seat.pos.fore, height: seat.pos.height, back: seat.pos.back, moving: seat.moving },
+            // (the real seat's position is null until read: the drawing keeps a plain one)
+            bg: t.bg, seat: { fore: G.isNum(seat.pos.fore) ? seat.pos.fore : 0.35, height: G.isNum(seat.pos.height) ? seat.pos.height : 0.5,
+                back: G.isNum(seat.pos.back) ? seat.pos.back : 0.3, moving: seat.moving },
             flap: ex.effective,
         });
     }

@@ -2,7 +2,8 @@
 /**
  * BRE Hub - one app for the whole car (docs/09). One page, laid out like iDrive 7's My Vehicle (page_home.js):
  * a list on the left, the car on the right. What it does so far:
- *   Seat Easy Access   the driver's seat back and down to get out, back to get in (seats_backend.js; demo only)
+ *   Seat Easy Access   the driver's seat back and down when the car is switched off, back when it starts
+ *                      (seats_backend.js; the real seat with the setting on "armed": seat_drive.js, parked only)
  *   Exhaust flap       open / closed / auto, held against the DME's timeout, or by the driving mode (exhaust.js)
  *
  * main.js is the shell: the shared state the page gets (app), the render loop, settings and the car's signals.
@@ -19,6 +20,7 @@ const { DmeLink } = require('./dme_link');
 const { Exhaust } = require('./exhaust');
 const { CarIdent } = require('./car_ident');
 const { SeatLink, SeatProbe } = require('./seat_link');
+const { SeatDrive, SeatMover, RealBackend } = require('./seat_drive');
 const home = require('./page_home');
 
 const FES = 'de.bmw.infotainment.drivingexcitement.FES';
@@ -30,12 +32,11 @@ mgu.run({
         const { ui, settings, log } = ctx;
         text.setLanguage(settings.get('language'));
 
-        const car = new Car(ctx, ['rpm', 'speed']);                    // scaled signals; a simulated drive only with Demo on
+        // scaled signals; a simulated drive only with Demo on. gear: the selector (P); condition: the vehicle state,
+        // whose drive-ready edges are Seat Easy Access's "started" and "switched off"
+        const car = new Car(ctx, ['rpm', 'speed', 'gear', 'condition']);
         const parked = parkedWatch(ctx, log);
         const positions = new seatsLib.Positions(ctx.dataDir, log);
-        const seats = seatsLib.createBackend(settings.get('easyEntry'), log);
-        const easyEntry = new seatsLib.EasyEntry(seats, positions, log);
-        easyEntry.setOffset(settings.get('seatOffset'));
 
         let loop = null;
         const repaint = () => { if (loop && loop.kick) loop.kick(); };
@@ -51,7 +52,34 @@ mgu.run({
         const exhaust = new Exhaust({ link: link, settings: settings, rpm: rpm, log: log, onChange: repaint });
         const ident = new CarIdent({ link: link, settings: settings, log: log, dataDir: ctx.dataDir });
         // the seat probe: reads the driver's seat module through the same diagnostic link, never writes (seat_link.js)
-        const seatProbe = new SeatProbe(new SeatLink(link, log), log, ctx.dataDir);
+        const seatLink = new SeatLink(link, log);
+        const seatProbe = new SeatProbe(seatLink, log, ctx.dataDir);
+
+        // Seat Easy Access moves the real seat only with the setting on "armed", and only while the car is parked
+        // for sure: a real speed under 1 km/h (none read = not parked) and the selector in P (when the car says)
+        const armed = () => settings.get('easyEntry') === 'armed';
+        const parkedStrict = () => {
+            const kmh = parked.speed(), stage = car.live && car.live.stage;
+            return kmh !== null && kmh < 1 && (stage === undefined || stage === 'P');
+        };
+        const mover = new SeatMover({ probe: seatProbe, seatLink: seatLink, drive: new SeatDrive(link, log), log: log,
+            guard: () => armed() && parkedStrict() });
+        const realSeats = new RealBackend({ probe: seatProbe, mover: mover, log: log });
+        realSeats.refresh = () => seatProbe.tick();
+        const demoSeats = seatsLib.createBackend('demo', log);
+        // the backend the setting picks, asked each time (the setting can change while the app runs)
+        const seats = {
+            current() { return armed() ? realSeats : demoSeats; },
+            get mode() { return this.current().mode; },
+            status() { return this.current().status(); },
+            refresh() { const b = this.current(); return b.refresh ? b.refresh() : Promise.resolve(); },
+            goTo(seat, target) { return this.current().goTo(seat, target); },
+            jog(seat, axis, dir) { return this.current().jog(seat, axis, dir); },
+            stop(seat) { demoSeats.stop(seat); realSeats.stop(seat); },
+            reason() { return armed() ? mover.reason : null; },
+        };
+        const easyEntry = new seatsLib.EasyEntry(seats, positions, log);
+        easyEntry.setOffset(settings.get('seatOffset'));
 
         // The page has its own list, with Settings in it: the kit's header keeps the app's name and no tabs
         // (the kit would add a Settings tab for BTN_SETTINGS, which stays in app.json for the HMI's own bar).
@@ -77,6 +105,26 @@ mgu.run({
 
         // the car moving stops any automatic seat move at once (docs/07, rule 1)
         setInterval(() => { if (parked.moving()) easyEntry.onCar({ parked: false }, settings.get('easyEntry')); }, 250);
+        // Seat Easy Access on the car's own switching: the vehicle state leaving drive-ready (10, FAHREN) is "switched
+        // off" (the seat back and down), reaching it is "started" (back to the driving position). Only real data (never
+        // the demo drive), and only edges seen while the app runs: the first state read moves nothing.
+        let lastState = null;
+        setInterval(() => {
+            const st = car.demoActive ? undefined : car.live && car.live.condition;
+            if (st === undefined || st === null || st === lastState) return;
+            const prev = lastState;
+            lastState = st;
+            if (prev === null) return;
+            const mode = settings.get('easyEntry'), ok = mode === 'armed' ? parkedStrict() : !parked.moving();
+            if (prev !== 10 && st === 10) {
+                log.info('seat easy access: the car started (vehicle state ' + prev + ' -> 10), parked ' + ok + ', ' + easyEntry.state);
+                easyEntry.carStarted(mode, ok);
+            } else if (prev === 10 && st !== 10) {
+                log.info('seat easy access: the car switched off (vehicle state 10 -> ' + st + '), parked ' + ok + ', ' + easyEntry.state);
+                easyEntry.carStopped(mode, ok);
+            }
+            repaint();
+        }, 250);
         // the exhaust's Closed guard, also while the app is not on screen
         setInterval(() => { exhaust.tick().catch((e) => log.error('exhaust tick', e)); }, 250);
         // the seat probe reads about once a second, only while its list is on screen (drawn in the last 2 s)
@@ -111,7 +159,8 @@ mgu.run({
         settings.onChange((k) => {
             if (k === 'language') text.setLanguage(settings.get('language'));
             if (k === 'seatOffset') easyEntry.setOffset(settings.get('seatOffset'));
-            if (k === 'easyEntry' && settings.get('easyEntry') === 'off') { easyEntry.manual(); seats.stop('driver'); }
+            // any change of the mode (off / demo / armed) stops whatever seat move runs
+            if (k === 'easyEntry') { easyEntry.manual(); seats.stop('driver'); }
             if (EXHAUST_KEYS.indexOf(k) >= 0) {
                 Promise.resolve(k === 'exhaustArm' ? exhaust.refresh() : null)
                     .then(() => exhaust.settingsChanged(k))

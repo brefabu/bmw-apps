@@ -18,9 +18,10 @@ apps/bre_hub/        aplicația principală (fișiere plate: build-ul ia doar .j
   page_home.js       singura pagină („My car”), ca My Vehicle din iDrive 7: lista din stânga, mașina cu puncte active în dreapta
   car_art.js         desenul mașinii (profil, culoare din setări); car_ident.js: modelul, din setare sau din cheia de tip a VIN-ului (doar citire)
   car_picture.js     fotografia mașinii ca celule într-un strat, câte una pentru fiecare culoare din „Paint”; car_photo_<id>.js și car_photos.js sunt generate (randări de stoc, vezi THIRD_PARTY.md)
-  seats_backend.js   backend-urile de scaune (doar demo acum) și Seat Easy Access: 75 % în spate și complet jos (docs/07)
-  dme_link.js        SINGURUL fișier care scrie în mașină: 3 citiri (VIN, clapetă) și cele 3 comenzi ale clapetei (2F 60FD)
-  seat_link.js       sonda scaunului: DOAR citiri 22 D700/D702/D704/D708/D712 de la modulul scaunului șoferului (0x6D), prin aceeași legătură
+  seats_backend.js   backend-ul demo și Seat Easy Access: la oprirea mașinii 75 % în spate și complet jos, la pornire înapoi (docs/07)
+  dme_link.js        singurul fișier care scrie în DME: 3 citiri (VIN, clapetă) și cele 3 comenzi ale clapetei (2F 60FD)
+  seat_link.js       sonda scaunului: DOAR citiri 22 D700/D702/D704/D708/D712 de la modulul scaunului șoferului (0x6D); învață sensul contoarelor
+  seat_drive.js      singurul fișier care scrie în modulul scaunului: 2E D708 față/spate și înălțime (+ 10 03 / 3E 00 dacă trebuie); armat din Setări, doar parcat
   exhaust.js         clapeta de evacuare: deschis / închis / auto / după modul de condus, ținere la 15 s, protecție la turație; pornește dezarmată
   NOTICE             sursa și licența codului adaptat din idrive7-apps Engine Config (MIT)
 kit/                 copia NESCHIMBATĂ a kitului idrive7-apps (MIT; renderd și emu GPL-3.0); vezi kit/SOURCE.json
@@ -34,7 +35,7 @@ mgu-repo.json        manifestul de sursă pentru MGU Store (docs/04)
 ## Comenzi
 
 ```sh
-node tests/test_seats_backend.js && node tests/test_exhaust.js && node tests/test_seat_link.js && node tests/smoke_pages.js   # înainte de fiecare commit
+node tests/test_seats_backend.js && node tests/test_exhaust.js && node tests/test_seat_link.js && node tests/test_seat_drive.js && node tests/smoke_pages.js   # înainte de fiecare commit
 docker compose up --build                                        # emulatorul pe Windows: http://localhost:8077, merge și fără oap-sdk/ (docs/03)
 node tools/car_photo.js reference/colours.json                   # pozele pe culori -> apps/bre_hub/car_photo_<id>.js (+ previzualizări în reference/)
 python3 kit/tools/build.py bre_hub                               # build; cere oap-sdk/ extras din unitate (docs/03)
