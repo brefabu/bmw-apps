@@ -262,6 +262,14 @@ Promise.resolve()
     assert.deepStrictEqual(await Promise.all(all), [1, 2, 'failed', 4, 5], 'in order, the failure only fails its own');
     assert.strictEqual(most, 1, 'never two at once');
     for (let i = 1; i < starts.length; i++) assert.ok(starts[i] - ends[i - 1] >= GAP_MS - 2, 'a gap before request ' + i);
+    const { COOL_MS } = require('../apps/bre_hub/dme_link');
+    assert.ok(starts[3] - ends[2] >= COOL_MS - 5, 'after a failure, a pause: the transport may still be on it');
+    // an urgent request (a STOP) waits its turn but not the pause
+    starts.length = 0; ends.length = 0;
+    await diag.physical(0x6D, 0x22, [0xEE]).catch(() => {});
+    const t = Date.now();
+    await diag.physical(0x6D, 0x2E, [0xD7, 0x08, 0, 0, 100], 1500, null, { urgent: true });
+    assert.ok(Date.now() - t < COOL_MS / 2, 'the STOP did not wait the pause');
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');

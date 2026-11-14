@@ -33,6 +33,8 @@ const FLAP = Object.freeze({
 const bytesToHex = (b) => (b || []).map((x) => hex(x)).join(' ');
 
 const GAP_MS = 25;              // between two requests (kit/runtime/readonly-diag.js, which Live Data uses on cars)
+const COOL_MS = 1500;           // after a request that got no answer or was turned away: the transport may still be
+                                // waiting on it, and turns everything away meanwhile (G30, 15.11.2026)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -40,16 +42,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * other apps and BMW's own services use it too (seen on the G30, 15.11.2026). So, as the kit's read-only link
  * does: every request of this Diag - the DME's and the seat's (seat_link.js, seat_drive.js share it) - one at a
  * time and at least GAP_MS after the one before, and a busy transport tried again soon (100, 200, 300 ... ms)
- * rather than after seconds.
+ * rather than after seconds. After a request without an answer, or turned away, the next waits COOL_MS - except
+ * an urgent one (opts.urgent: a seat STOP), which still waits its turn but never the pause.
  */
 function pace(diag) {
     const raw = diag.physical.bind(diag);
     let chain = Promise.resolve(), next = 0;
     diag.physical = function () {
-        const args = arguments;
-        const run = () => sleep(Math.max(0, next - Date.now()))
+        const args = arguments, urgent = !!(args[5] && args[5].urgent);
+        const run = () => sleep(urgent ? 0 : Math.max(0, next - Date.now()))
             .then(() => raw.apply(null, args))
-            .then((r) => { next = Date.now() + GAP_MS; return r; }, (e) => { next = Date.now() + GAP_MS; throw e; });
+            .then((r) => { next = Date.now() + (r ? GAP_MS : COOL_MS); return r; },
+                (e) => { next = Date.now() + COOL_MS; throw e; });
         const p = chain.then(run, run);
         chain = p.catch(() => {});
         return p;
@@ -133,4 +137,4 @@ class DmeLink {
     }
 }
 
-module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS };
+module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS, COOL_MS };

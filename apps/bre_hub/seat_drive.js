@@ -7,9 +7,11 @@
  *   2E D708 <motor> <action> <PWM>   motor 0x00 fore / aft (SLV) or 0x01 height (SHV); action 0x00 STOP,
  *                                    0x01 PLUS (forward / up), 0x02 MINUS (back / down); PWM 100 %
  *                                    (SGBD FAS_G11: MOTOR, ARG_0xD708_D, TAB_MOTOR_AKTION)
- *   10 03                            the extended session, only when the module refuses 2E in its default one
- *                                    (NRC 7E / 7F), and 3E 00 (tester present) every 2 s only while a move runs;
- *                                    the module drops back to its default session by itself ~5 s after
+ *   10 03                            the extended session, opened before a move (the seat module's workshop jobs run
+ *                                    in it: docs/07; on the G30 a 2E in the default session went unanswered), and
+ *                                    3E 00 (tester present) every 2 s while the move runs
+ *   10 01                            back to the default session when the move ends, whatever happened (it ends any
+ *                                    tester control); else the module drops back by itself ~5 s after the last 3E
  * Never: the backrest or any other motor, the Hall counter reset (D722), coding, routines, security access.
  *
  * A move (SeatMover.moveAxis): one axis at a time toward a Hall counter. The motor's direction comes from the
@@ -63,10 +65,13 @@ class SeatDrive {
 
     get available() { return !!(this.link && this.link.available && this.link.diag); }
 
-    /** tries: how often a busy transport is tried again (100, 200 ... ms apart); STOP gets more. */
-    async _send(sid, data, timeoutMs, tries) {
+    /**
+     * tries: how often a busy transport is tried again (100, 200 ... ms apart); STOP gets more. urgent: never waits
+     * the pause the shared link takes after an unanswered request (dme_link.js pace), only its turn.
+     */
+    async _send(sid, data, timeoutMs, tries, urgent) {
         const reply = await this.link.diag.physical(FAS, sid, data, timeoutMs || 1500, replyTo(sid, data),
-            { maxRetries: tries === undefined ? 2 : tries, retryBaseMs: 100, callTimeoutMs: 1500 });
+            { maxRetries: tries === undefined ? 2 : tries, retryBaseMs: 100, urgent: !!urgent });
         if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
         if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
         if (reply[0] === sid + 0x40) return { ok: true };
@@ -88,7 +93,7 @@ class SeatDrive {
         const once = async () => {
             let a = null;
             for (let i = 0; i < sends; i++) {
-                a = await this._send(0x2E, data, waitMs, tries);
+                a = await this._send(0x2E, data, waitMs, tries, stop);
                 if (a.ok || (a.nrc !== null && a.nrc !== undefined)) return a;      // answered: taken or refused
                 if (i + 1 < sends) this.log.warn('seat: ' + axis + ' ' + action + ' unanswered (' + a.reason + '): sent again');
             }
@@ -110,12 +115,27 @@ class SeatDrive {
 
     /** The extended session (10 03); kept with tester present only while a move runs (keep()). */
     async _session() {
-        this.log.info('seat: UDS -> FAS 10 03 (the module asked for the extended session)');
-        const r = await this._send(0x10, [0x03]);
+        this.log.info('seat: UDS -> FAS 10 03 (extended session)');
+        const r = await this._send(0x10, [0x03], 3000, 4);
         this.extended = !!r.ok;
-        if (!r.ok) this.log.warn('seat: extended session refused: ' + r.reason);
+        if (!r.ok) this.log.warn('seat: extended session not opened: ' + r.reason);
         else this.keep(true);
         return r;
+    }
+
+    /** Before a move: the extended session. Resolves { ok, reason }. */
+    async begin() {
+        if (!this.available) return { ok: false, reason: 'no diagnostic link' };
+        try { return await this._session(); } catch (e) { return { ok: false, reason: String(e && e.message || e) }; }
+    }
+
+    /** After a move (STOP already sent): tester present off and the default session (10 01). Never throws. */
+    async end() {
+        const was = this.extended;
+        this.keep(false);
+        if (!was || !this.available) return;
+        this.log.info('seat: UDS -> FAS 10 01 (default session)');
+        try { await this._send(0x10, [0x01], 3000, 4, true); } catch (e) { this.log.warn('seat: default session: ' + e); }
     }
 
     /** Tester present (3E 00) every 2 s while on; off: the module falls back to its default session by itself. */
@@ -254,11 +274,15 @@ class SeatMover {
     /** Several axes, one after the other: [[axis, counter], ...]. Resolves true when all arrived. */
     async run(steps) {
         if (this.busy) { this.reason = 'already moving'; return false; }
-        this.busy = true; this.aborted = false; this.reason = null;
-        this.drive.keep(true);
+        this.aborted = false; this.reason = null;
+        if (!this.guard()) { this.reason = 'not allowed now'; return false; }
+        this.busy = true;
         try {
-            for (const s of steps) {
-                if (!(await this.moveAxis(s[0], s[1]))) return false;
+            // the extended session first; without it no motor command goes
+            const s = await this.drive.begin();
+            if (!s.ok) { this.reason = 'extended session: ' + s.reason; return false; }
+            for (const st of steps) {
+                if (!(await this.moveAxis(st[0], st[1]))) return false;
             }
             return true;
         } catch (e) {
@@ -267,7 +291,7 @@ class SeatMover {
             await this.drive.stopAll().catch(() => {});
             return false;
         } finally {
-            this.drive.keep(false);
+            await this.drive.end();                    // tester present off, the default session (10 01)
             this.busy = false;
         }
     }

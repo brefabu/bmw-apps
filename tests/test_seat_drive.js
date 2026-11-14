@@ -72,7 +72,12 @@ function fakeModule(o) {
             m.motor[axis] = action;
             return [0x6E, 0xD7, 0x08];
         }
-        if (sid === 0x10) { m.ext = true; return [0x50, 0x03]; }
+        if (sid === 0x10) {
+            if (m.sessionRefused) return m.sessionRefused === 'timeout' ? null : [0x7F, 0x10, 0x22];
+            m.ext = data[0] === 0x03;
+            if (!m.ext) m.motor = { slv: 'stop', shv: 'stop' };       // the default session ends tester control
+            return [0x50, data[0]];
+        }
         if (sid === 0x3E) return [0x7E, 0x00];
         return [0x7F, sid, 0x11];
     };
@@ -129,7 +134,7 @@ function onlyAllowed(mod) {
             assert.deepStrictEqual(s.data.slice(0, 2), [0xD7, 0x08], 'only D708');
             assert.ok(s.data[2] === 0 || s.data[2] === 1, 'only fore / aft and height');
             assert.ok(s.data[3] >= 0 && s.data[3] <= 2 && s.data[4] === 100 && s.data.length === 5);
-        } else if (s.sid === 0x10) assert.deepStrictEqual(s.data, [0x03]);
+        } else if (s.sid === 0x10) assert.ok(s.data.length === 1 && (s.data[0] === 0x03 || s.data[0] === 0x01), 'only 10 03 / 10 01');
         else if (s.sid === 0x3E) assert.deepStrictEqual(s.data, [0x00]);
         else assert.fail('service ' + s.sid.toString(16) + ' sent');
     });
@@ -165,14 +170,33 @@ Promise.resolve()
     assert.ok(w.indexOf('shv stop') < w.indexOf('slv plus'), 'then forward');
     onlyAllowed(mod);
 }))
-.then(() => test('a module that wants the extended session: 10 03, then the same command again', async () => {
+.then(() => test('the extended session opens before the first command, and the default one closes the move', async () => {
     const mod = fakeModule({ slv: 33100, shv: 32900, needSession: true });
     const r = rig(mod);
     const ok = await r.mover.run([['slv', 33000]]);
     assert.strictEqual(ok, true, r.mover.reason);
-    const services = mod.sent.filter((s) => s.sid !== 0x22).map((s) => s.sid);
-    assert.deepStrictEqual(services.slice(0, 3), [0x2E, 0x10, 0x2E], 'refused, session, again');
+    const services = mod.sent.filter((s) => s.sid !== 0x22 && s.sid !== 0x3E).map((s) => s.sid.toString(16) + ' ' + s.data[0].toString(16));
+    assert.deepStrictEqual(services[0], '10 3', 'the session first');
+    assert.strictEqual(services[1].indexOf('2e'), 0, 'then the command');
+    assert.deepStrictEqual(services[services.length - 1], '10 1', 'the default session at the end');
+    assert.strictEqual(mod.ext, false);
     onlyAllowed(mod);
+}))
+.then(() => test('no extended session (refused or unanswered): no motor command at all, and why', async () => {
+    for (const how of ['refused', 'timeout']) {
+        const mod = fakeModule({ slv: 33100, shv: 32900, sessionRefused: how });
+        const r = rig(mod);
+        assert.strictEqual(await r.mover.run([['slv', 32801]]), false);
+        assert.ok(/^extended session: /.test(r.mover.reason), r.mover.reason);
+        assert.strictEqual(writes(mod).length, 0, how + ': nothing written');
+    }
+}))
+.then(() => test('a move that fails still ends in the default session', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900, wiring: -1 });
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), false);
+    const last = mod.sent.filter((s) => s.sid === 0x10).pop();
+    assert.deepStrictEqual(last.data, [0x01]);
 }))
 .then(() => test('the motor runs the other way than learned: stopped within a few counts', async () => {
     const mod = fakeModule({ slv: 33100, shv: 32900, wiring: -1 });
@@ -206,6 +230,7 @@ Promise.resolve()
     r.allowed = false;
     assert.strictEqual(await r.mover.run([['slv', 32801]]), false);
     assert.strictEqual(writes(mod).length, 0);
+    assert.strictEqual(mod.sent.filter((s) => s.sid === 0x10).length, 0, 'not even the session');
 }))
 .then(() => test('an end stop short of the target: stopped for no progress', async () => {
     const mod = fakeModule({ slv: 33100, shv: 32900, stops: { slv: [33000, 33321], shv: ENDS.shv } });

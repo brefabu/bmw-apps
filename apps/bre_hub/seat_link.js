@@ -116,8 +116,10 @@ class SeatLink {
             // the transport turns a request away while it is busy with the one before: a few quick tries
             // (the transport's own call waits 8 s by default: never that long here)
             // busy: tried again after 100, 200, 300, 400 ms (a move: once, after 100 ms)
-            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || (quick ? 1000 : 1500), replyTo(0x22, req),
-                quick ? { maxRetries: 1, retryBaseMs: 100, callTimeoutMs: 1200 } : { maxRetries: 4, retryBaseMs: 100, callTimeoutMs: 1500 });
+            // (the call to the transport itself keeps the kit's wait: cut short, the transport went on with the
+            // request while the next ones came, and turned them all away)
+            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || (quick ? 1000 : 2000), replyTo(0x22, req),
+                quick ? { maxRetries: 1, retryBaseMs: 100, callTimeoutMs: 3000 } : { maxRetries: 4, retryBaseMs: 100 });
             if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
             if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
             if (reply[0] === 0x62) return { ok: true, data: reply.slice(3) };
