@@ -2,7 +2,7 @@
   "id": "bre_hub",
   "title": "My car",
   "description": "My car (BRE Hub): your car on one page, in the style of iDrive 7. Seat Easy Access (demo) and the exhaust flap: open, closed, auto or by the driving mode, held against the engine controller's timeout. The exhaust flap ships disarmed (simulated)",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "vendor": "brefabu",
   "loggingId": "BRE1",
   "iconGlyph": "BRE",
@@ -38,6 +38,8 @@
   "settings": [
     { "key": "language", "label": "Language", "type": "choice", "default": "en",
       "options": [["en", "English"], ["ro", "Romana"]] },
+    { "key": "demo", "label": "Demo", "type": "choice", "default": "off",
+      "options": [["off", "Off (the car's own data)"], ["on", "On (a simulated drive)"]] },
     { "key": "theme", "label": "Look", "type": "choice", "default": "bre_idrive",
       "options": [["bre_idrive", "iDrive 7"], ["bre_graphite", "Graphite"], ["bre_sand", "Sand"]] },
     { "key": "carModel", "label": "Car", "type": "choice", "default": "auto",

@@ -15,7 +15,7 @@ kit/tools/build.py packs only this folder's top-level .js files (docs/03). This 
 | `car_picture.js` | the car's photograph, one per paint: cells drawn once into a cached layer; only the paint shown is loaded |
 | `car_photos.js`, `car_photo_<id>.js` | the photographs, made by `node tools/car_photo.js reference/colours.json`. Stock renders, not ours: see THIRD_PARTY.md |
 | `car_ident.js` | which car it is: the setting, or the VIN's type key read from the DME (read only; table not yet confirmed on a car) |
-| `seats_backend.js` | seat backends (`demo` only) and Seat Easy Access: back to 75 % of the rail and fully down (docs/07) |
+| `seats_backend.js` | seat backends (`demo` only) and Seat Easy Access: back to 75 % of the rail and fully down (docs/07). Not the DEMO switch: that one (the kit's `demo` setting, Off by default) only picks the car's own signals or a simulated drive |
 | `dme_link.js` | the only file that sends a request to the car: three reads and the exhaust flap's three `2F 60FD` requests |
 | `exhaust.js` | the exhaust flap: Open / Closed / Auto / by driving mode, held every 15 s, Closed handed back above a set engine speed. Ships disarmed (simulated) |
 | `NOTICE` | source and licence of the code adapted from idrive7-apps Engine Config (MIT) |

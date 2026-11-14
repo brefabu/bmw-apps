@@ -203,13 +203,17 @@ function draw(cv, t, app, d) {
     cv.text(model.code + ' ' + model.body + ' · ' + paint.name + (model.source === 'car' ? ' · ' + T('car.fromCar') : ''),
         cx, bottom - 18, D.TYPE.caption.size, t.dim, { font: D.TYPE.caption.font, align: 'center' });
 
-    // status, top right: Parked is on or off; Demo while the numbers are not the car's
+    // status, top right: Parked is on or off; Demo is a switch (the kit's "demo" setting): on, a simulated
+    // drive; off, only the car's own signals, nothing made up when they are missing
     let x = D.W - D.MARGIN;
-    const chips = [[T(parked ? 'chip.parked' : 'chip.moving'), parked ? 'on' : 'off']];
-    if (d.demo) chips.push([T('chip.demo'), 'accent']);
+    const demo = app.settings.get('demo') === 'on';
+    const chips = [
+        [T(parked ? 'chip.parked' : 'chip.moving'), parked ? 'on' : 'off'],
+        [T('chip.demo'), demo ? 'on' : 'off', { key: 'demo', run: () => app.settings.set('demo', demo ? 'off' : 'on') }],
+    ];
     chips.forEach((c) => {
         x -= D.chipWidth(cv, c[0]);
-        D.chip(cv, t, x, top + D.SPACE.s, c[0], c[1]);
+        D.chip(cv, t, x, top + D.SPACE.s, c[0], c[1], c[2]);
         x -= D.SPACE.xs;
     });
 }

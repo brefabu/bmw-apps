@@ -87,6 +87,8 @@ assert.deepStrictEqual(choices('carModel'), ['auto'].concat(Object.keys(MODELS))
 assert.deepStrictEqual(choices('seatOffset'), home.OFFSETS.map(String).sort());
 assert.strictEqual(setting('exhaustArm').default, 'off', 'the exhaust flap ships disarmed');
 assert.strictEqual(setting('language').default, 'en');
+assert.strictEqual(setting('demo').default, 'off', 'the car\'s own data by default, no simulated drive');
+assert.deepStrictEqual(choices('demo'), ['off', 'on'], 'Demo is a switch: the kit\'s "auto" is not offered');
 // the VIN gives only its type key
 assert.strictEqual(typeKey('WBAJA51000G123456'), 'JA51');
 assert.strictEqual(typeKey('too short'), null);
@@ -148,7 +150,7 @@ let n = 0;
                         });
                         home.ui.open = false; home.ui.k = 0;                    // the list folded away
                         const cv = drawPage(own, datas[k]);
-                        if (own) assert.deepStrictEqual(cv.targets.slice().sort(), ['grip', 'spot-exhaust', 'spot-seat'], 'folded: the car and the grip only');
+                        if (own) assert.deepStrictEqual(cv.targets.slice().sort(), ['demo', 'grip', 'spot-exhaust', 'spot-seat'], 'folded: the car, the grip and the Demo switch');
                         n++;
                     });
                 });
@@ -163,6 +165,12 @@ const D0 = datas.parked;
 home.ui.view = 'main'; home.ui.open = true; home.ui.k = 1;
 let cv = drawPage(true, D0);
 assert.deepStrictEqual(cv.targets.filter((k) => /^main-/.test(k)), ['main-seat', 'main-exhaust', 'main-paint', 'main-settings']);
+// the Demo switch, top right: on, off again
+assert.strictEqual(cv.targets[cv.targets.length - 1], 'demo', 'the Demo switch is the controller\'s last stop');
+drawPage(true, D0, 'demo');
+assert.strictEqual(settingsValues.demo, 'on', 'Demo switched on');
+drawPage(true, D0, 'demo');
+assert.strictEqual(settingsValues.demo, 'off', 'Demo switched off');
 drawPage(true, D0, 'main-paint');
 assert.strictEqual(home.ui.view, 'paint');
 drawPage(true, D0, 'paint-bernina');

@@ -189,16 +189,18 @@ function chipWidth(cv, text) {
 /**
  * A status chip at x, y (36 high). kind 'on': the state holds - iDrive 7's selection (the warm gradient over
  * the accent line, white text); 'off': it does not (flat, grey line, dim text); any other kind (default
- * 'accent'): a tinted tag over a line in that colour. Returns its width.
+ * 'accent'): a tinted tag over a line in that colour. opts: { run, key } makes an on / off chip a switch the
+ * touch screen and the controller press (cv.target). Returns its width.
  */
-function chip(cv, t, x, y, text, kind) {
-    const w = chipWidth(cv, text), label = String(text).toUpperCase();
+function chip(cv, t, x, y, text, kind, opts) {
+    const w = chipWidth(cv, text), label = String(text).toUpperCase(), o = opts || {};
     const opt = { font: TYPE.tag.font, align: 'center', spacing: 2 };
     if (kind === 'on' || kind === 'off') {
         const on = kind === 'on';
         cv.gradientRect(x, y, w, 36, on ? [[0, t.focusTop], [1, t.focusBottom]] : [[0, t.raised], [1, t.raisedBottom]]);
         cv.fillRect(x, y + 34, w, 2, on ? t.accent : t.panelEdge);
         cv.text(label, x + w / 2, y + 25, TYPE.tag.size, on ? t.text : t.dim, opt);
+        if (o.run && cv.own && cv.target) cv.target(x, y, w, 36, o.run, o.key || label, RADIUS.control);
         return w;
     }
     const c = stateColor(t, kind || 'accent');

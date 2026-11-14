@@ -29,7 +29,7 @@ mgu.run({
         const { ui, settings, log } = ctx;
         text.setLanguage(settings.get('language'));
 
-        const car = new Car(ctx, ['rpm', 'speed']);                    // scaled signals + demo drive without a car
+        const car = new Car(ctx, ['rpm', 'speed']);                    // scaled signals; a simulated drive only with Demo on
         const parked = parkedWatch(ctx, log);
         const positions = new seatsLib.Positions(ctx.dataDir, log);
         const seats = seatsLib.createBackend(settings.get('easyEntry'), log);
