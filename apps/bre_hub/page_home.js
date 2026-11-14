@@ -6,7 +6,8 @@
  * it in that paint (car_art.js).
  *
  *   list 'main'     Seat Easy Access, Exhaust flap, Paint, Settings
- *   list 'seat'     Easy Access on / off, how far back the seat goes, try it (the demo), Stop
+ *   list 'seat'     Easy Access on / off, how far back the seat goes, try it (the demo), Stop, the seat module
+ *   list 'seatinfo' the seat probe: the driver's seat module, its axes' positions and switches (read only)
  *   list 'exhaust'  Open / Closed / Auto / By driving mode, Driving modes, Hold
  *   list 'modes'    the flap for the Sport, Comfort and Eco Pro driving modes (a press steps to the next)
  *   list 'paint'    the car's colour in the picture (the "paint" setting)
@@ -42,6 +43,13 @@ function stepOffset(app, d) {
     const n = OFFSETS[Math.max(0, Math.min(OFFSETS.length - 1, (i < 0 ? OFFSETS.indexOf(75) : i) + d))];
     app.settings.set('seatOffset', String(n));
 }
+/** The seat probe's state as a row value (seat_link.js). */
+function probeState(p) {
+    if (!p || p.state === 'idle') return '-';
+    if (p.state === 'found') return T(p.init && p.init.initialised === false ? 'probe.notInit' : 'probe.found');
+    return T({ reading: 'probe.reading', none: 'probe.none', nolink: 'probe.noLink' }[p.state] || 'probe.reading');
+}
+
 function groupFlap(app, key) {
     const v = String(app.settings.get(key) || '').toUpperCase();
     return FLAP_TEXT[v] ? v : null;
@@ -70,8 +78,40 @@ function rows(app, parked) {
                 { key: 'seat-less', label: T('seats.offset'), value: offsetOf(app) + ' %', stepper: true,
                     less: () => stepOffset(app, -1), more: () => stepOffset(app, 1) },
                 { key: 'seat-try', label: T(tryKey), color: moving ? 'crit' : null, dim: !on || (!parked && !moving), run: tryRun },
+                { key: 'seat-module', label: T('seats.module'), value: probeState(app.seatProbe), next: true,
+                    run: () => { show(app, 'seatinfo', 'probe-back'); if (app.seatProbe) app.seatProbe.tick().catch(() => {}); } },
             ],
             foot: !parked ? { text: T('seats.parkedOnly'), warn: true } : on ? { text: T('state.' + ee.state) + ' · ' + T('seats.demo') } : null,
+        };
+    }
+    if (ui.view === 'seatinfo') {
+        // the seat probe (seat_link.js): what the driver's seat module says, read only
+        const p = app.seatProbe;
+        const axis = (a) => {
+            let value = '-';
+            if (p && p.config) {
+                const fit = p.config[a];
+                if (fit === 0) value = T('probe.notFitted');
+                else if (fit === 1) value = T('probe.noSensor');
+                else if (fit === 2 && p.hall && p.hall[a] !== null) {
+                    const pct = p.percent(a);
+                    value = String(p.hall[a]) + (pct === null ? '' : ' / ' + pct + ' %');
+                }
+            }
+            const moving = !!(p && p.motor && (p.motor[a] === 'plus' || p.motor[a] === 'minus'));
+            return { key: 'probe-' + a, label: T('axis.' + a), value: value, color: moving ? 'warn' : null };
+        };
+        const sw = p && p.switches;
+        return {
+            list: [
+                { key: 'probe-back', icon: 'back', label: T('seats.module'), run: () => show(app, 'seat', 'seat-module') },
+                { key: 'probe-module', label: T('probe.module'), value: probeState(p) },
+                axis('slv'), axis('shv'), axis('lnv'),
+                { key: 'probe-buttons', label: T('probe.buttons'), value: !sw ? '-' : T(sw.pressed ? 'probe.pressed' : 'probe.released'),
+                    color: sw && sw.pressed ? 'warn' : null },
+                { key: 'probe-reset', label: T('probe.resetTravel'), dim: !p, run: () => { if (p) p.resetTravel(); } },
+            ],
+            foot: p && p.state === 'none' ? { text: T('probe.why', { reason: p.reason || '-' }), warn: true } : { text: T('probe.foot') },
         };
     }
     if (ui.view === 'exhaust') {

@@ -108,6 +108,12 @@ const app = {
     focusKey: () => focused, focus: (k) => { focused = k; }, openSettings: () => {},
 };
 app.easyEntry = new S.EasyEntry(seats, app.positions, quiet);
+// the seat probe as seat_link.js leaves it: a module found, the seat moving back, its switch held
+app.seatProbe = {
+    state: 'found', reason: null, config: { slv: 2, shv: 2, lnv: 1 }, init: { initialised: true },
+    hall: { slv: 30000, shv: 20000, lnv: null }, motor: { slv: 'minus', shv: 'off', lnv: null }, switches: { pressed: true },
+    percent: (a) => (a === 'slv' ? 42 : null), resets: 0, resetTravel() { this.resets++; }, tick: () => Promise.resolve(),
+};
 assert.strictEqual(app.ident.model().code, 'G30');
 
 const datas = {
@@ -143,7 +149,7 @@ let n = 0;
                 [false, true].forEach((mv) => {
                     moving = mv;
                     Object.keys(datas).forEach((k) => {
-                        ['main', 'seat', 'exhaust', 'modes', 'paint'].forEach((view) => {
+                        ['main', 'seat', 'seatinfo', 'exhaust', 'modes', 'paint'].forEach((view) => {
                             home.ui.view = view; home.ui.open = true; home.ui.k = 1;
                             try { drawPage(own, datas[k]); } catch (e) { e.message = view + ' / ' + k + ' / ' + lang + ': ' + e.message; throw e; }
                             n++;
@@ -206,6 +212,18 @@ drawPage(true, D0, 'seat-try');
 assert.strictEqual(app.easyEntry.state, 'STOPPED', 'the same row is Stop while it moves');
 drawPage(true, D0, 'seat-try');
 assert.strictEqual(app.easyEntry.state, 'IDLE');
+// the seat probe's list: read only, back to the seat list
+drawPage(true, D0, 'seat-module');
+assert.strictEqual(home.ui.view, 'seatinfo', 'Seat module opens the probe');
+cv = drawPage(true, D0);
+assert.deepStrictEqual(cv.targets.filter((k) => /^probe-/.test(k)), ['probe-back', 'probe-reset'], 'only Back and Measure again can be pressed');
+drawPage(true, D0, 'probe-reset');
+assert.strictEqual(app.seatProbe.resets, 1);
+app.seatProbe.state = 'none'; app.seatProbe.reason = 'timeout';
+drawPage(true, D0);
+app.seatProbe.state = 'found';
+drawPage(true, D0, 'probe-back');
+assert.strictEqual(home.ui.view, 'seat');
 drawPage(true, D0, 'seat-on');
 assert.strictEqual(settingsValues.easyEntry, 'off');
 cv = drawPage(true, D0);

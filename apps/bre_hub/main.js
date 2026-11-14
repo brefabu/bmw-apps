@@ -18,6 +18,7 @@ const seatsLib = require('./seats_backend');
 const { DmeLink } = require('./dme_link');
 const { Exhaust } = require('./exhaust');
 const { CarIdent } = require('./car_ident');
+const { SeatLink, SeatProbe } = require('./seat_link');
 const home = require('./page_home');
 
 const FES = 'de.bmw.infotainment.drivingexcitement.FES';
@@ -49,6 +50,8 @@ mgu.run({
         };
         const exhaust = new Exhaust({ link: link, settings: settings, rpm: rpm, log: log, onChange: repaint });
         const ident = new CarIdent({ link: link, settings: settings, log: log, dataDir: ctx.dataDir });
+        // the seat probe: reads the driver's seat module through the same diagnostic link, never writes (seat_link.js)
+        const seatProbe = new SeatProbe(new SeatLink(link, log), log, ctx.dataDir);
 
         // The page has its own list, with Settings in it: the kit's header keeps the app's name and no tabs
         // (the kit would add a Settings tab for BTN_SETTINGS, which stays in app.json for the HMI's own bar).
@@ -56,7 +59,7 @@ mgu.run({
         if (display) display.hasSettings = () => false;
 
         const app = {
-            ctx, settings, log, car, parked, seats, positions, easyEntry, exhaust, ident,
+            ctx, settings, log, car, parked, seats, positions, easyEntry, exhaust, ident, seatProbe,
             /** The page target the controller is on (its key), or null. */
             focusKey() {
                 const k = display && display.focusKey;
@@ -76,8 +79,15 @@ mgu.run({
         setInterval(() => { if (parked.moving()) easyEntry.onCar({ parked: false }, settings.get('easyEntry')); }, 250);
         // the exhaust's Closed guard, also while the app is not on screen
         setInterval(() => { exhaust.tick().catch((e) => log.error('exhaust tick', e)); }, 250);
+        // the seat probe reads about once a second, only while its list is on screen (drawn in the last 2 s)
+        let drawnAt = 0;
+        setInterval(() => {
+            if (home.ui.view !== 'seatinfo' || Date.now() - drawnAt > 2000) return;
+            seatProbe.tick().then(repaint).catch((e) => log.error('seat probe', e));
+        }, 1000);
 
         function render() {
+            drawnAt = Date.now();
             const t = D.theme(ctx), d = car.data();
             const cv = ctx.canvas(D.W, D.H).clear(t.bg);
             try {

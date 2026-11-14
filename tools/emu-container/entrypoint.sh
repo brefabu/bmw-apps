@@ -19,11 +19,13 @@ fi
 
 # only what emu.js watches (apps/, kit/runtime/); rsync rewrites only the files that changed. --inplace:
 # Node watches each file by its inode, and rsync's usual temp file + rename would give a changed file a new
-# inode, so only its first change would be seen
+# inode, so only its first change would be seen. An editor's temp file that vanishes mid-copy makes rsync exit
+# 24 ("some files vanished"): that must not end the loop (set -e above), or every later save is silently missed.
 (
+    set +e
     while :; do
-        rsync -a --inplace --delete --exclude __pycache__ /work/apps/ /app/apps/
-        rsync -a --inplace --delete /work/kit/runtime/ /app/kit/runtime/
+        rsync -a --inplace --delete --exclude __pycache__ --exclude '*.tmp.*' /work/apps/ /app/apps/ || echo "bre-emu: sync of apps/ said $?, trying again" >&2
+        rsync -a --inplace --delete /work/kit/runtime/ /app/kit/runtime/ || echo "bre-emu: sync of kit/runtime/ said $?, trying again" >&2
         sleep 1
     done
 ) &
