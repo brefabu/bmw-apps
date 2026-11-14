@@ -45,6 +45,11 @@ function stepOffset(app, d) {
 }
 /** The line under the seat list: the state, demo or armed, and why the real seat stopped. */
 function seatFoot(app, ee, mode) {
+    // a save just made says so for a few seconds
+    const last = ee.events && ee.events[0];
+    if (last && Date.now() - last.t < 5000 && (last.key === 'ee.saved' || last.key === 'ee.noPosition')) {
+        return { text: T(last.key), warn: last.key === 'ee.noPosition' };
+    }
     if (mode !== 'armed') return { text: T('state.' + ee.state) + ' · ' + T('seats.demo') };
     const why = app.seats && app.seats.reason ? app.seats.reason() : null;
     if (ee.state === 'STOPPED' && why) return { text: T('seats.stoppedWhy', { reason: why }), warn: true };
@@ -87,6 +92,9 @@ function rows(app, parked) {
                 { key: 'seat-less', label: T('seats.offset'), value: offsetOf(app) + ' %', stepper: true,
                     less: () => stepOffset(app, -1), more: () => stepOffset(app, 1) },
                 { key: 'seat-try', label: T(tryKey), color: moving ? 'crit' : null, dim: !on || (!parked && !moving), run: tryRun },
+                // position 1: where the seat comes back to when the car starts
+                { key: 'seat-save', label: T('seats.save1'), value: ee.hasPosition && ee.hasPosition() ? T('seats.saved') : '-',
+                    dim: !on || moving, run: () => { if (ee.savePosition) ee.savePosition().catch(() => {}); } },
                 { key: 'seat-module', label: T('seats.module'), value: probeState(app.seatProbe), next: true,
                     run: () => { show(app, 'seatinfo', 'probe-back'); if (app.seatProbe) app.seatProbe.tick().catch(() => {}); } },
             ],

@@ -22,8 +22,10 @@
  *   - Disarmed (the default, setting exhaustArm): simulated. Nothing is sent, not even the flap's reads.
  *   - Armed: a command goes only when this DME answered the flap's identifiers (link.readFlap). A DME without
  *     the flap is never written to.
- *   - Starting the app sends nothing. A command leaves on a press, on a driving mode change while the driving
- *     mode is followed, on the hold's repeat and on the rpm guard handing the flap back.
+ *   - The choice is remembered (setting exhaustMode, Fabian 15.11.2026): the last Open / Closed / Auto pressed, or
+ *     By driving mode (exhaustDrive). Starting sends only that remembered choice, armed and with the flap found
+ *     (main.js: linkUp after the first look at the car). Otherwise a command leaves on a press, on a driving mode
+ *     change while the driving mode is followed, on the hold's repeat and on the rpm guard handing the flap back.
  *   - Arming sends nothing for a manual choice: what was picked while simulated is dropped (OEM), press again.
  *   - One command at a time; OEM (the hand-back) is never dropped: pressed while another is in flight, it goes
  *     right after it.
@@ -98,7 +100,13 @@ class Exhaust {
         this._timer = null;
         this._q = Promise.resolve();
         this._follow = this.following;
+        // the choice made before the app last stopped (By driving mode is its own setting)
+        const kept = upper(this.settings.get('exhaustMode'));
+        if (!this.following && kept !== 'OEM' && MODES.indexOf(kept) >= 0) { this.desired = kept; this.source = 'press'; }
     }
+
+    /** Keep a manual choice for the next start (a press; arming, which drops one, keeps Auto). */
+    _keep(mode) { if (this.settings.get('exhaustMode') !== mode.toLowerCase()) this.settings.set('exhaustMode', mode.toLowerCase()); }
 
     get armed() { return this.settings.get('exhaustArm') === 'on'; }
     get following() { return this.settings.get('exhaustDrive') === 'on'; }
@@ -198,6 +206,7 @@ class Exhaust {
         } else if (MODES.indexOf(mode) >= 0) {
             if (this.following) { this._follow = false; this.settings.set('exhaustDrive', 'off'); }
             this.desired = mode; this.source = 'press';
+            this._keep(mode);
         } else return Promise.resolve();
         this.rpmLost = false;
         if (this.desired === 'CLOSED' && this.source === 'press' && this._blind()) {
@@ -267,6 +276,7 @@ class Exhaust {
                 if (m) { this.desired = m; this.source = 'drive'; this._pauseFor(m); return this.apply(false); }
             }
             this.desired = 'OEM'; this.source = 'start'; this.paused = false; this.why = null;
+            this._keep('OEM');
             return Promise.resolve();
         }
         if (key === 'exhaustHold') {

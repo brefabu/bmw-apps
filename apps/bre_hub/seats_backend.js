@@ -150,7 +150,8 @@ function exitPosition(pos, offset) {
  *   IDLE --(the car switched off, parked)--> MOVING_OUT --> OUT --(the car started, parked)--> MOVING_IN --> IDLE
  *   any state --(moving, a manual move, a failed move)--> STOPPED, which goes back to IDLE on the next start
  *   (or reset()).
- * Out is exitPosition(where the seat is, this.offset); in is where the seat was. The real triggers are
+ * Out is exitPosition(where the seat is, this.offset); in is position 1 when saved (savePosition), else where
+ * the seat was. The real triggers are
  * carStopped() / carStarted() (main.js, from the vehicle state); onCar() is the page's demo (door and ignition).
  * OUT is kept with the positions, so a restart of the app between switching off and starting still brings the
  * seat back.
@@ -229,8 +230,27 @@ class EasyEntry {
             });
         });
     }
+    /**
+     * Position 1: the seat as it is now (a fresh read first), where it comes back to when the car starts - in
+     * place of where it was when the car was switched off. Resolves true when saved.
+     */
+    savePosition() {
+        return Promise.resolve(this.backend.refresh ? this.backend.refresh() : null).catch(() => null).then(() => {
+            const now = this.backend.status().seats.driver.pos;
+            if (!isFinite(now.fore) || !isFinite(now.height) || now.fore === null || now.height === null) {
+                this.note('ee.noPosition');
+                return false;
+            }
+            this.positions.set('driver', 'mem1', now);
+            this.note('ee.saved');
+            return true;
+        });
+    }
+    /** Position 1 saved. */
+    hasPosition() { return !!this.positions.get('driver', 'mem1'); }
     goIn() {
-        const drive = this.positions.get('driver', 'drive');
+        // position 1 when saved, else where the seat was when the car was switched off
+        const drive = this.positions.get('driver', 'mem1') || this.positions.get('driver', 'drive');
         if (!drive) { this._set('IDLE'); return Promise.resolve(); }
         this.state = 'MOVING_IN'; this.note('ee.movingIn');
         return Promise.resolve(this.backend.goTo('driver', drive)).then((ok) => {

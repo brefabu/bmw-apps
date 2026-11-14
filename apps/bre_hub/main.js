@@ -189,7 +189,8 @@ mgu.run({
             .then(() => (on ? exhaust.linkUp() : null))
             .then(repaint).catch((e) => log.error('link', e));
         link.onAvailable(lookAtCar);
-        await lookAtCar(false);
+        // the link up already: the remembered flap choice goes now (armed, the flap found); else when it comes up
+        await lookAtCar(link.available);
         log.info('bre_hub ready (exhaust ' + (exhaust.armed ? 'armed' : 'simulated') + ', car ' + ident.model().code + ' by ' + ident.model().source + ')');
     },
 });

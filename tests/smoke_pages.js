@@ -213,6 +213,9 @@ drawPage(true, D0, 'seat-try');
 assert.strictEqual(app.easyEntry.state, 'STOPPED', 'the same row is Stop while it moves');
 drawPage(true, D0, 'seat-try');
 assert.strictEqual(app.easyEntry.state, 'IDLE');
+// position 1 can be saved from the seat list
+cv = drawPage(true, D0);
+assert.ok(cv.targets.indexOf('seat-save') >= 0, 'Save as position 1 is a target');
 // the seat probe's list: read only, back to the seat list
 drawPage(true, D0, 'seat-module');
 assert.strictEqual(home.ui.view, 'seatinfo', 'Seat module opens the probe');

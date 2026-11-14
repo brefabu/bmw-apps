@@ -2,7 +2,7 @@
   "id": "bre_hub",
   "title": "My car",
   "description": "My car (BRE Hub): your car on one page, in the style of iDrive 7. Seat Easy Access: the driver's seat back and down when the car is switched off, back when it starts (parked only). The exhaust flap: open, closed, auto or by the driving mode, held against the engine controller's timeout. Both ship disarmed",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "vendor": "brefabu",
   "loggingId": "BRE1",
   "iconGlyph": "BRE",
@@ -75,6 +75,8 @@
     { "key": "exhaustEco", "label": "Exhaust in Eco Pro", "type": "choice", "default": "closed",
       "options": [["open", "Open"], ["closed", "Closed"], ["oem", "Auto"]] },
     { "key": "exhaustDrive", "label": "Exhaust follows the driving mode", "type": "choice", "default": "off",
-      "options": [["off", "Off"], ["on", "On"]], "hidden": true }
+      "options": [["off", "Off"], ["on", "On"]], "hidden": true },
+    { "key": "exhaustMode", "label": "Exhaust flap: the last choice", "type": "choice", "default": "oem",
+      "options": [["oem", "Auto"], ["open", "Open"], ["closed", "Closed"]], "hidden": true }
   ]
 }

@@ -206,6 +206,35 @@ async function run() {
     r.ex.close();
     ok('arming sends nothing by itself; disarming stops the repeats');
 
+    // 10b. the choice is remembered: a press keeps it; the next start brings it back, and only the start of an
+    //      armed app with the flap sends it (linkUp); disarmed it stays simulated
+    r = rig();
+    await r.ex.refresh();
+    await r.ex.press('OPEN');
+    assert.strictEqual(r.values.exhaustMode, 'open', 'Open kept');
+    r.ex.close();
+    const kept = Object.assign({}, r.values);
+    let r2 = rig(kept);
+    assert.strictEqual(r2.ex.view().selected, 'OPEN', 'shown as Open after a restart');
+    assert.deepStrictEqual(r2.sent, [], 'nothing sent by building it');
+    await r2.ex.refresh();
+    await r2.ex.linkUp();
+    assert.deepStrictEqual(r2.sent, ['OPEN'], 'sent once the flap is found');
+    await r2.ex.press('OEM');
+    assert.strictEqual(r2.values.exhaustMode, 'oem');
+    r2 = rig(Object.assign({}, kept, { exhaustArm: 'off' }));
+    await r2.ex.refresh();
+    await r2.ex.linkUp();
+    assert.deepStrictEqual(r2.sent, [], 'disarmed: the remembered choice is only simulated');
+    r2 = rig({ exhaustMode: 'closed', exhaustDrive: 'on' });
+    assert.strictEqual(r2.ex.view().selected, 'DRIVE', 'By driving mode wins over a kept manual choice');
+    r2 = rig({ exhaustArm: 'off', exhaustMode: 'open' });
+    r2.values.exhaustArm = 'on';
+    await r2.ex.refresh();
+    await r2.ex.settingsChanged('exhaustArm');
+    assert.strictEqual(r2.values.exhaustMode, 'oem', 'arming drops a choice made while simulated, for the next start too');
+    ok('the choice is remembered, and only an armed start with the flap sends it');
+
     // 11. dme_link.js: only the three flap requests can be written, only three identifiers read
     assert.deepStrictEqual([FLAP.OPEN, FLAP.CLOSED, FLAP.OEM].map((b) => b.map(hex).join('')), ['60FD0303E8', '60FD032328', '60FD00']);
     assert.ok(Object.isFrozen(FLAP) && Object.isFrozen(FLAP.OPEN));

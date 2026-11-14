@@ -96,6 +96,30 @@ async function run() {
     assert.ok(new S.Positions(dir, quiet).get('driver', 'drive'));
     ok('positions are kept');
 
+    // 8. position 1: saved where the seat is; the car started brings the seat there, not where it was at the stop
+    await b.goTo('driver', { fore: 0.2, height: 0.7, back: 0.3 });
+    assert.strictEqual(ee.hasPosition(), false);
+    assert.strictEqual(await ee.savePosition(), true);
+    assert.strictEqual(ee.hasPosition(), true);
+    assert.strictEqual(ee.events[0].key, 'ee.saved');
+    await b.goTo('driver', { fore: 0.4, height: 0.4, back: 0.3 });   // someone else drove it like this
+    assert.strictEqual(ee.carStopped('demo', true), true);
+    await wait(2700);
+    assert.strictEqual(ee.state, 'OUT');
+    assert.strictEqual(ee.carStarted('demo', true), true);
+    await wait(3800);                                                    // (0.75 -> 0.2: the demo seat's 0.22 / s)
+    assert.strictEqual(ee.state, 'IDLE');
+    at = b.status().seats.driver.pos;
+    assert.ok(Math.abs(at.fore - 0.2) < 1e-9 && Math.abs(at.height - 0.7) < 1e-9, 'at position 1, not where it was at the stop');
+    assert.ok(new S.Positions(dir, quiet).get('driver', 'mem1'), 'position 1 kept across a restart');
+    // no position to save (a real seat not read yet): nothing saved, and it says so
+    const blind = new S.EasyEntry({ status: () => ({ seats: { driver: { pos: { fore: null, height: null, back: null } } } }),
+        refresh: () => Promise.resolve() }, new S.Positions(fs.mkdtempSync(path.join(os.tmpdir(), 'bre-seats-')), quiet), quiet);
+    assert.strictEqual(await blind.savePosition(), false);
+    assert.strictEqual(blind.events[0].key, 'ee.noPosition');
+    assert.strictEqual(blind.hasPosition(), false);
+    ok('position 1: saved, and where the seat comes back to when the car starts');
+
     b.close();
     console.log(passed + ' passed');
 }
