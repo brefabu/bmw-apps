@@ -33,10 +33,11 @@ const READS = Object.freeze([DID.CONFIG_HW, DID.HALL, DID.INIT, DID.MOTOR, DID.S
 // zurueck, ab"). toward: the end the app counts the axis toward (seats_backend.js: fore 0 = fully forward ..
 // 1 = fully back; height 0 = fully down .. 1 = fully up).
 // Which way the Hall COUNTER runs is not assumed: it is learned on the car (SeatProbe, rises), from the counter
-// moving while the module reports its motor (D708) or the seat's switch (D712) on PLUS or MINUS. On the G30 two
-// readings disagreed (photos: rising toward the front; the live % on 0.2.3: rising toward the back), and a wrong
-// direction would drive the seat toward the wheel: so nothing is shown as a share, and no target is worked out,
-// before an axis has shown its direction.
+// moving while the module reports its motor (D708) or the seat's switch (D712) on PLUS or MINUS. A direction
+// read off photos or a screen is easy to get backwards (on the G30 it was: 0.2.2's share of the counter range read
+// as the opposite of the photos until it was seen to be the raw range; the counter rises toward the front), and a
+// wrong one would drive the seat toward the wheel: so nothing is shown as a share, and no target is worked out,
+// before an axis has shown its direction on the car.
 const AXES = Object.freeze({
     slv: { i: 0, sw: [0, 1], norm: [1, 2], plus: 'front', minus: 'back', toward: 'back' },   // fore / aft (SLV)
     shv: { i: 1, sw: [2, 3], norm: [6, 7], plus: 'up', minus: 'down', toward: 'up' },          // height (SHV)

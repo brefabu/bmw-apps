@@ -155,7 +155,7 @@ Promise.resolve()
     });
     assert.strictEqual(diag.sent.filter((s) => s.data[1] === 0x00 && s.data[0] === 0xD7).length, 1, 'the make-up is read once');
 }))
-.then(() => test('the G30\'s ends, the counter rising toward the BACK (the live reading on 0.2.3)', async () => {
+.then(() => test('the G30\'s ends, were the counter rising toward the BACK: the target mirrors', async () => {
     // fore / aft between 32627 and 33321, height between 32473 and 33217 (15.11.2026)
     const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(32627, 32473), 0xD708: MOTOR_OFF, 0xD712: SW_NONE };
     const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null);
@@ -179,7 +179,7 @@ Promise.resolve()
     assert.strictEqual(probe.countFor('slv', 0), 32627, 'fully forward');
     assert.strictEqual(probe.fraction('lnv', 32390), null, 'the backrest has no known direction');
 }))
-.then(() => test('the same ends, the counter rising toward the FRONT (the photos): the target mirrors', async () => {
+.then(() => test('the same ends, the counter rising toward the FRONT (the G30, 15.11.2026)', async () => {
     const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD702: hall(33321, 32473), 0xD708: MOTOR_OFF, 0xD712: SW_NONE };
     const probe = new L.SeatProbe(new L.SeatLink(linkOf(fakeDiag(table)), quiet), quiet, null);
     await drive(probe, table, [
