@@ -67,6 +67,7 @@ mgu.run({
         const realSeats = new RealBackend({ probe: seatProbe, mover: mover, log: log });
         // a fresh position, patiently: right after the car is switched off the link is often busy (G30, 15.11.2026)
         realSeats.refresh = async () => {
+            if (seatProbe.fresh(5000)) return;            // the background watch read it just now: move at once
             const asked = Date.now();
             for (;;) {
                 await seatProbe.tick();
@@ -81,7 +82,7 @@ mgu.run({
             get mode() { return this.current().mode; },
             status() { return this.current().status(); },
             refresh() { const b = this.current(); return b.refresh ? b.refresh() : Promise.resolve(); },
-            goTo(seat, target) { return this.current().goTo(seat, target); },
+            goTo(seat, target, opts) { return this.current().goTo(seat, target, opts); },
             jog(seat, axis, dir) { return this.current().jog(seat, axis, dir); },
             stop(seat) { demoSeats.stop(seat); realSeats.stop(seat); },
             reason() { return armed() ? mover.reason : null; },
@@ -141,6 +142,13 @@ mgu.run({
             if (what) log.info('seat easy access: ' + what + ' (vehicle state ' + prev + ' -> ' + st + '), parked ' + ok + ', ' + easyEntry.state);
             repaint();
         }, 250);
+        // armed, the car drive-ready: the seat's position kept fresh in the background (one read every 3 s), so that
+        // switching off moves the seat at once instead of first waiting for a read on a busy link
+        setInterval(() => {
+            if (!armed() || mover.busy || seatProbe.busy || home.ui.view === 'seatinfo') return;
+            if (!(car.live && car.live.condition === 10)) return;
+            seatProbe.readPosition().catch(() => {});
+        }, 3000);
         // the exhaust's Closed guard, also while the app is not on screen
         setInterval(() => { exhaust.tick().catch((e) => log.error('exhaust tick', e)); }, 250);
         // the seat probe reads about once a second, only while its list is on screen (drawn in the last 2 s)

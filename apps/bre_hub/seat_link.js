@@ -159,6 +159,22 @@ class SeatProbe {
     /** A poll is running. */
     get busy() { return !!this._tick; }
 
+    /** The position, when it was read within ms (null otherwise). */
+    fresh(ms) { return this.hall && this.hallAt && Date.now() - this.hallAt <= ms ? this.hall : null; }
+
+    /** A position read elsewhere (a move's): kept as the latest. */
+    seen(hall) { if (hall) { this.hall = hall; this.hallAt = Date.now(); this.hallError = null; } }
+
+    /** Only the position (one request; the background watch): waits for a poll that runs. Resolves true when read. */
+    readPosition() {
+        if (this._tick) return this._tick.then(() => this.hallAt > Date.now() - 1000);
+        if (!this.seat.available || this.state !== 'found') return this.tick().then(() => this.hallAt > Date.now() - 1000);
+        const done = () => { this._tick = null; };
+        const p = this._readHall();
+        this._tick = p.then(done, done);
+        return p;
+    }
+
     _load() {
         const out = { travel: {}, rises: {}, speeds: {} };
         const okSpeed = (v) => typeof v === 'number' && v > SPEED_MIN && v < SPEED_MAX;

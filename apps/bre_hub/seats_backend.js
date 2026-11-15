@@ -290,7 +290,8 @@ class EasyEntry {
                 return null;
             }
             this.positions.set(this._key(), 'drive', now);
-            return this.backend.goTo('driver', exitPosition(now, this.offset)).then((ok) => {
+            // getting out need not be exact: a coarse move (one pulse per axis, ~1 cm is there)
+            return this.backend.goTo('driver', exitPosition(now, this.offset), { coarse: true }).then((ok) => {
                 if (this.state !== 'MOVING_OUT') return;
                 this._set(ok ? 'OUT' : 'STOPPED'); this.note(ok ? 'ee.atExit' : 'ee.notFinished');
             });

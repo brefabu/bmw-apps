@@ -37,11 +37,16 @@ const PWM = 100;
 const TOLERANCE = 6;            // counts: at the target
 const NEAR = 25;                // counts: a seat that stopped moving this close to the target is there (an end stop
                                 // a few counts short of a target at the end of the travel - fully down)
-const FIRST_SHARE = 0.85;       // the first pulse aims at this share of the way: short rather than past
+const FIRST_SHARE = 0.92;       // the first pulse aims at this share of the way: short rather than past (a precise
+                                // move; a coarse one - getting out - aims at the whole way)
+const COARSE_TOL = 25;          // counts (~1 cm): close enough for a coarse move (the exit position need not be exact)
+const END_EXTRA = 1.15;         // a target at the end of the travel (fully down): the pulse that long longer - the
+                                // seat's own end stop ends it, the "short of the target" of an end stop is avoided
+const FRESH_MS = 1500;          // a position read this recently (the probe's) starts a move without another read
 const MAX_PULSES = 4;           // per axis and move
 const MIN_PULSE_MS = 120;       // a motor needs about this long to move at all
 const MAX_PULSE_MS = 8000;      // no pulse runs longer (the whole travel takes ~10 s)
-const SETTLE_MS = 400;          // after STOP, before the position is read
+const SETTLE_MS = 250;          // after STOP, before the position is read
 const GUARD_MS = 50;            // how often a pulse checks Stop and parked (no request: local state)
 const TEST_MS = 1000;           // the speed test's pulse per direction
 const MOVED = 5;                // counts: less than this after a pulse is "did not move"
@@ -219,11 +224,18 @@ class SeatMover {
         return up ? r : other(r);
     }
 
-    /** One axis to a counter, by timed pulses. Resolves true at the target, false otherwise (this.reason says why). */
-    async moveAxis(axis, target) {
+    /**
+     * One axis to a counter, by timed pulses. opts.coarse: within COARSE_TOL is there and the first pulse aims at the
+     * whole way (getting out). Resolves true at the target, false otherwise (this.reason says why).
+     */
+    async moveAxis(axis, target, opts) {
         if (!this._actionFor(axis, true)) { this.reason = 'direction not learned'; return false; }
         if (!this.guard()) { this.reason = 'not allowed now'; return false; }
-        const first = await this._settled();
+        const coarse = !!(opts && opts.coarse), tol = coarse ? COARSE_TOL : TOLERANCE;
+        const ends = this.probe.travel && this.probe.travel[axis];
+        const toEnd = !!(ends && (target <= ends[0] + 2 || target >= ends[1] - 2));
+        // a position just read (the background watch, Easy Access's refresh) saves a read before the first pulse
+        const first = (this.probe.fresh && this.probe.fresh(FRESH_MS)) || await this._settled();
         let p = first && first[axis];
         if (p === null || p === undefined) { this.reason = 'position not read'; return false; }
         this.axis = axis;
@@ -232,11 +244,12 @@ class SeatMover {
         try {
             for (let i = 0; i < MAX_PULSES; i++) {
                 const d = target - p;
-                if (Math.abs(d) <= TOLERANCE) return true;
+                if (Math.abs(d) <= tol) return true;
                 const up = d > 0, action = this._actionFor(axis, up);
                 const v = this.probe.speed(axis, action);
                 if (!v) { this.reason = 'measure the seat speed first (Seat module)'; return false; }
-                const ms = Math.round(Math.max(MIN_PULSE_MS, Math.min(MAX_PULSE_MS, Math.abs(d) * (i === 0 ? FIRST_SHARE : 1) / v)));
+                const share = i === 0 && !coarse ? FIRST_SHARE : 1;
+                const ms = Math.round(Math.max(MIN_PULSE_MS, Math.min(MAX_PULSE_MS, Math.abs(d) * share / v * (toEnd ? END_EXTRA : 1))));
                 this.progress.action = action; this.progress.pulse = i + 1;
                 this.log.info('seat: ' + axis + ' pulse ' + (i + 1) + ' ' + action + ' ' + ms + ' ms for ' + Math.abs(d) + ' counts');
                 const r = await this.pulse(axis, action, ms);
@@ -245,13 +258,14 @@ class SeatMover {
                 const h = await this._settled();
                 const q = h && h[axis];
                 if (q === null || q === undefined) { this.reason = 'position not read'; return false; }
+                if (this.probe.seen) this.probe.seen(h);
                 this.progress.now = q;
                 const moved = q - p;
                 if (up ? moved < -WRONG_WAY : moved > WRONG_WAY) {
                     this.probe.forgetDirection(axis);
                     this.reason = 'went the wrong way: the direction is learned again'; return false;
                 }
-                if (Math.abs(target - q) <= TOLERANCE) return true;
+                if (Math.abs(target - q) <= tol) return true;
                 if (Math.abs(moved) < MOVED) {
                     if (Math.abs(target - q) <= NEAR) return true;                       // an end stop at the target
                     this.reason = 'the seat did not move'; return false;
@@ -289,10 +303,10 @@ class SeatMover {
     }
 
     /** Several axes, one after the other: [[axis, counter], ...]. Resolves true when all arrived. */
-    run(steps) {
+    run(steps, opts) {
         return this._session(async () => {
             for (const st of steps) {
-                if (!(await this.moveAxis(st[0], st[1]))) {
+                if (!(await this.moveAxis(st[0], st[1], opts))) {
                     this.log.warn('seat: ' + st[0] + ' stopped: ' + this.reason);
                     return false;
                 }
@@ -371,8 +385,11 @@ class RealBackend {
             seats: { driver: driver, passenger: { pos: { fore: null, height: null, back: null }, moving: false, job: null } } };
     }
 
-    /** The driver's seat to target (fractions; back is not moved). Fore / aft back first, then height. */
-    async goTo(seat, target) {
+    /**
+     * The driver's seat to target (fractions; back is not moved). Fore / aft back first, then height.
+     * opts.coarse: close enough is there (getting out).
+     */
+    async goTo(seat, target, opts) {
         if (seat !== 'driver') return false;
         // a fresh position before working out the move (one just read, e.g. by Easy Access's refresh, will do)
         if (!this.probe.hallAt || Date.now() - this.probe.hallAt > 1500) await this.probe.tick();
@@ -385,7 +402,7 @@ class RealBackend {
         const back = target.fore !== null && target.fore !== undefined && target.fore >= now.fore;
         if (back) { if (fore !== null) steps.push(['slv', fore]); if (height !== null) steps.push(['shv', height]); }
         else { if (height !== null) steps.push(['shv', height]); if (fore !== null) steps.push(['slv', fore]); }
-        const ok = await this.mover.run(steps);
+        const ok = await this.mover.run(steps, opts);
         await this.probe.tick().catch(() => {});
         return ok;
     }
@@ -395,4 +412,4 @@ class RealBackend {
     close() { this.mover.stop('closing'); }
 }
 
-module.exports = { SeatDrive, SeatMover, RealBackend, MOTOR, ACTION, PWM, TOLERANCE, NEAR, TEST_MS, MAX_PULSES };
+module.exports = { SeatDrive, SeatMover, RealBackend, MOTOR, ACTION, PWM, TOLERANCE, COARSE_TOL, NEAR, TEST_MS, MAX_PULSES };

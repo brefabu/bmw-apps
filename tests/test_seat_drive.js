@@ -191,6 +191,38 @@ Promise.resolve()
     for (let i = 0; i < w.length; i += 2) assert.strictEqual(w[i + 1].split(' ')[1], 'stop', 'every pulse ends with STOP');
     onlyAllowed(mod);
 }))
+.then(() => test('getting out coarse (Easy Access): one pulse per axis, within ~1 cm, fully down by the end stop', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900 });
+    const r = rig(mod);
+    await r.probe.tick();
+    const now = r.backend.status().seats.driver.pos;
+    assert.strictEqual(await r.backend.goTo('driver', S.exitPosition(now, 0.75), { coarse: true }), true, r.mover.reason);
+    assert.deepStrictEqual(writes(mod), ['slv minus', 'slv stop', 'shv minus', 'shv stop'], 'one pulse each');
+    assert.ok(near(mod.slv, 32801, Drv.COARSE_TOL), String(mod.slv));
+    assert.strictEqual(Math.round(mod.shv), 32473, 'fully down: the pulse ran into the end stop');
+    onlyAllowed(mod);
+}))
+.then(() => test('a position read just now: the move starts without another read', async () => {
+    const mod = fakeModule({ slv: 33100 });
+    const r = rig(mod);
+    await r.probe.tick();
+    const before = mod.sent.length;
+    assert.strictEqual(await r.mover.run([['slv', 32801]]), true, r.mover.reason);
+    const sent = mod.sent.slice(before).map((s) => s.sid.toString(16) + (s.sid === 0x22 ? ' ' + s.data[1].toString(16) : ''));
+    assert.deepStrictEqual(sent.slice(0, 2), ['10', '2e'], 'the session, then the first pulse straight away');
+    onlyAllowed(mod);
+}))
+.then(() => test('the background watch reads only the position: one request', async () => {
+    const mod = fakeModule({ slv: 33000 });
+    const r = rig(mod);
+    await r.probe.tick();
+    const before = mod.sent.length;
+    mod.slv = 33050;
+    assert.strictEqual(await r.probe.readPosition(), true);
+    assert.deepStrictEqual(mod.sent.slice(before).map((s) => s.data[1]), [0x02], 'only 22 D702');
+    assert.strictEqual(r.probe.hall.slv, 33050);
+    assert.ok(r.probe.fresh(1000));
+}))
 .then(() => test('getting in: up first, then forward, back to where it was', async () => {
     const mod = fakeModule({ slv: 32801, shv: 32473 });
     const r = rig(mod);
