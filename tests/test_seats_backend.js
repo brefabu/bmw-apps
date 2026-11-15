@@ -158,11 +158,42 @@ async function run() {
     mode = 'armed';                                                          // armed afterwards
     assert.strictEqual(ee11.carStarted('armed', true), false, 'the demo let it out: the real seat stays');
     assert.strictEqual(ee11.events[0].key, 'ee.otherMode');
+    assert.strictEqual(ee11.state, 'IDLE', 'the OUT of the demo cleared: Try: get out next');
     assert.deepStrictEqual(moved, [], 'the real seat was never moved');
+    // the same at start (main.js sync): an OUT kept from the demo is cleared once armed
+    mode = 'demo';
+    assert.strictEqual(ee11.carStopped('demo', true), true);
+    await wait(3000);
+    mode = 'armed';
+    const ee11b = new S.EasyEntry(both, new S.Positions(dir11, quiet), quiet);
+    assert.strictEqual(ee11b.state, 'OUT');
+    assert.strictEqual(ee11b.sync(), true);
+    assert.strictEqual(ee11b.state, 'IDLE');
     const kept = new S.Positions(dir11, quiet);
     assert.ok(kept.get('driver', 'drive') && !kept.get('driver.real', 'drive'), 'the demo\'s driving position is the demo\'s only');
     ok('the demo\'s positions and OUT never move the real seat');
 
+    // 12. the vehicle state: leaving 10 = switched off, reaching it = started; the first state read moves nothing,
+    //     except a seat let out with the car found running already (the app came up after the engine started)
+    const dir12 = fs.mkdtempSync(path.join(os.tmpdir(), 'bre-seats-'));
+    let ee12 = new S.EasyEntry(b, new S.Positions(dir12, quiet), quiet);
+    assert.strictEqual(ee12.vehicleState(null, 5, 'demo', true), null, 'the first state: nothing');
+    assert.strictEqual(ee12.vehicleState(null, 10, 'demo', true), null, 'running already, nothing let out: nothing');
+    assert.strictEqual(ee12.vehicleState(10, 10, 'demo', true), null);
+    assert.strictEqual(ee12.vehicleState(10, 12, 'off', true), null, 'off: nothing, not even noted');
+    assert.strictEqual(ee12.vehicleState(10, 12, 'demo', true), 'switched off');
+    assert.deepStrictEqual([ee12.events[1].key, ee12.events[1].vars], ['ee.carOff', { from: 10, to: 12 }], 'noted with the states');
+    await wait(3000);
+    assert.strictEqual(ee12.state, 'OUT');
+    assert.strictEqual(ee12.vehicleState(12, 7, 'demo', true), null, 'other changes: nothing');
+    ee12 = new S.EasyEntry(b, new S.Positions(dir12, quiet), quiet);
+    assert.strictEqual(ee12.vehicleState(null, 10, 'demo', true), 'running already', 'the app comes up with the engine running');
+    assert.strictEqual(ee12.state, 'MOVING_IN');
+    await wait(3000);
+    assert.strictEqual(ee12.state, 'IDLE');
+    assert.strictEqual(ee12.vehicleState(7, 10, 'demo', true), 'started');
+    assert.strictEqual(ee12.events[0].key, 'ee.notNow', 'started with the seat already in: says nothing to do');
+    ok('the vehicle state: switched off, started, and a running car found at start');
     b.close();
     console.log(passed + ' passed');
 }

@@ -44,7 +44,7 @@ function rig(set, o) {
     const link = {
         available: opt.up !== false,
         async readFlap() { const last = sent[sent.length - 1]; return { supported: opt.flap !== false, commandedPct: last === 'OPEN' ? 10 : last === 'CLOSED' ? 90 : null }; },
-        async flap(mode) { await wait(5); sent.push(mode); return { ok: true }; },
+        async flap(mode) { await wait(5); sent.push(mode); return opt.refuse ? { ok: false, reason: 'conditions not correct' } : { ok: true }; },
     };
     const settings = { get: (k) => values[k], set: (k, v) => { values[k] = v; } };
     const ex = new Exhaust({ link: link, settings: settings, rpm: () => eng.rpm, log: quiet, holdMs: 60 });
@@ -148,14 +148,14 @@ async function run() {
     await r.ex.refresh();
     r.eng.rpm = null;
     await r.ex.press('CLOSED');
-    assert.deepStrictEqual(r.sent, ['OEM']);
+    assert.deepStrictEqual(r.sent, [], 'nothing held: no hand-back to send (and no engine speed)');
     assert.strictEqual(r.ex.view().note.key, 'ex.rpmLost');
     r.eng.rpm = 900; await r.ex.tick();
-    assert.deepStrictEqual(r.sent, ['OEM'], 'not resumed by itself');
+    assert.deepStrictEqual(r.sent, [], 'not resumed by itself');
     await r.ex.press('CLOSED');
-    assert.deepStrictEqual(r.sent, ['OEM', 'CLOSED']);
+    assert.deepStrictEqual(r.sent, ['CLOSED']);
     r.eng.rpm = null; await r.ex.tick();
-    assert.deepStrictEqual(r.sent, ['OEM', 'CLOSED', 'OEM'], 'the engine speed went: handed back');
+    assert.deepStrictEqual(r.sent, ['CLOSED', 'OEM'], 'the engine speed went while Closed was held: handed back');
     ok('Closed needs a live engine speed');
 
     // 9. by driving mode, with the flap of each group as set
@@ -234,6 +234,42 @@ async function run() {
     await r2.ex.settingsChanged('exhaustArm');
     assert.strictEqual(r2.values.exhaustMode, 'oem', 'arming drops a choice made while simulated, for the next start too');
     ok('the choice is remembered, and only an armed start with the flap sends it');
+
+    // 10c. the engine off: Open waits, and goes when the engine starts; it stops being held when the engine stops
+    r = rig({ exhaustHold: 'on' });
+    await r.ex.refresh();
+    r.eng.rpm = 0; await r.ex.tick();
+    await r.ex.press('OPEN');
+    assert.deepStrictEqual(r.sent, [], 'engine off: nothing sent');
+    assert.strictEqual(r.ex.view().note.key, 'ex.waitEngine');
+    assert.strictEqual(r.ex.view().selected, 'OPEN', 'still the choice');
+    await wait(150);
+    assert.deepStrictEqual(r.sent, [], 'and nothing held');
+    r.eng.rpm = 800; await r.ex.tick();
+    assert.deepStrictEqual(r.sent, ['OPEN'], 'the engine started: sent');
+    await wait(150);
+    assert.ok(r.sent.length >= 2, 'held while the engine runs');
+    r.eng.rpm = 0; await r.ex.tick();
+    const nOff = r.sent.length;
+    await wait(200);
+    assert.strictEqual(r.sent.length, nOff, 'the engine stopped: no more repeats');
+    assert.strictEqual(r.ex.view().note.key, 'ex.waitEngine');
+    r.ex.close();
+    ok('the engine off: Open waits for it, and is not held without it');
+
+    // 10d. the DME refuses: not held (no repeat every 15 s); tried once more when the engine next starts
+    r = rig({ exhaustHold: 'on' }, { refuse: true });
+    await r.ex.refresh();
+    await r.ex.tick();
+    await r.ex.press('OPEN');
+    assert.deepStrictEqual(r.sent, ['OPEN']);
+    await wait(250);
+    assert.deepStrictEqual(r.sent, ['OPEN'], 'refused: not sent again by the hold');
+    assert.strictEqual(r.ex.view().note.key, 'ex.notTaken');
+    r.eng.rpm = 0; await r.ex.tick(); r.eng.rpm = 900; await r.ex.tick();
+    assert.deepStrictEqual(r.sent, ['OPEN', 'OPEN'], 'once more on the next engine start');
+    r.ex.close();
+    ok('a refused command is not held; tried again on the next engine start');
 
     // 11. dme_link.js: only the three flap requests can be written, only three identifiers read
     assert.deepStrictEqual([FLAP.OPEN, FLAP.CLOSED, FLAP.OEM].map((b) => b.map(hex).join('')), ['60FD0303E8', '60FD032328', '60FD00']);

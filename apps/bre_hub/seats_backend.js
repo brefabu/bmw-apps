@@ -28,6 +28,8 @@ const JOG_HOLD_MS = 350;        // a jog stops when it is not repeated within th
 const TICK_MS = 50;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const EVENTS = 10;
+const DRIVE_READY = 10;         // VehicleCondition FAHREN (kit/car.js): the car started              // Easy Access's last events, shown with the requests (never on disk)
 const DEMO = 'driver', REAL = 'driver.real';     // where the demo's and the real seat's positions are kept
 const REFRESH_MS = 12000;       // a backend's fresh position read: given up after this (the position then counts as unknown)
 
@@ -179,6 +181,18 @@ class EasyEntry {
         this.events = [];                          // the last few events, shown on the page; never written to disk
         this.car = { doorOpen: false, ignition: true, parked: true };
     }
+    /**
+     * An OUT that belongs to the other seat (the demo's while armed, or the other way round) means nothing here:
+     * back to IDLE, so Try and the car's own switching start afresh. main.js calls it at start and when the mode
+     * changes. Resolves true when it cleared one.
+     */
+    sync() {
+        if (this.state === 'OUT' && this.outKey && this.outKey !== this._key()) {
+            this._set('IDLE'); this.note('ee.otherMode');
+            return true;
+        }
+        return false;
+    }
     /** Where this seat's positions are kept: the real seat's apart from the demo's. */
     _key() { return this.backend && this.backend.mode === 'armed' ? REAL : DEMO; }
     _set(state) {
@@ -187,9 +201,36 @@ class EasyEntry {
         if (state === 'OUT') { this.outKey = this._key(); this.positions.setFlag(this.outKey, 'out', true); }
         else { this.outKey = null; this.positions.setFlag(REAL, 'out', false); this.positions.setFlag(DEMO, 'out', false); }
     }
+    /**
+     * The vehicle state changed (main.js, VehicleCondition; 10 = drive-ready): prev (null: the first one read) and st.
+     * Leaving 10 is "switched off", reaching it "started". The first state read moves nothing - except a seat this app
+     * let out, with the car found running already (the app came up after the engine was started): back in, as a
+     * start would have. Resolves what it took it for ('started' | 'switched off' | 'running already') or null.
+     */
+    vehicleState(prev, st, mode, parked) {
+        if (st === undefined || st === null || st === prev || !this.enabled(mode)) return null;
+        if (prev === null || prev === undefined) {
+            if (st !== DRIVE_READY || this.state !== 'OUT') return null;
+            this.note('ee.carOnFound', { to: st });
+            this.carStarted(mode, parked);
+            return 'running already';
+        }
+        if (prev !== DRIVE_READY && st === DRIVE_READY) {
+            this.note('ee.carOn', { from: prev, to: st });
+            this.carStarted(mode, parked);
+            return 'started';
+        }
+        if (prev === DRIVE_READY && st !== DRIVE_READY) {
+            this.note('ee.carOff', { from: prev, to: st });
+            this.carStopped(mode, parked);
+            return 'switched off';
+        }
+        return null;
+    }
     /** The car was switched off (the vehicle state left drive-ready), or Try: get out: the seat out of the way. */
     carStopped(mode, parked) {
-        if (!this.enabled(mode) || this.state !== 'IDLE') return false;
+        if (!this.enabled(mode)) return false;
+        if (this.state !== 'IDLE') { this.note('ee.notNow', { state: this.state }); return false; }
         if (!parked) { this.note('ee.notParked'); return false; }
         this.goOut();
         return true;
@@ -197,18 +238,20 @@ class EasyEntry {
     /** The car was started (drive-ready), or Try: get in: back to the driving position if the seat was let out. */
     carStarted(mode, parked) {
         if (this.state === 'STOPPED') { this._set('IDLE'); this.note('ee.ready'); return false; }
-        if (!this.enabled(mode) || this.state !== 'OUT') return false;
+        if (!this.enabled(mode)) return false;
+        if (this.state !== 'OUT') { this.note('ee.notNow', { state: this.state }); return false; }
         // let out by the demo: the real seat was never moved, so it is not brought back from anywhere
-        if (this.outKey && this.outKey !== this._key()) { this.note('ee.otherMode'); return false; }
+        if (this.sync()) return false;
         if (!parked) { this.note('ee.notParked'); return false; }
         this.goIn();
         return true;
     }
     /** key: a bre_text key (ee.*), shown translated on the page. */
-    note(key) {
-        this.events.unshift({ t: Date.now(), key: key });
-        if (this.events.length > 5) this.events.pop();
-        if (this.log) this.log.info('easy entry: ' + key);
+    /** vars: the text's {placeholders} (bre_text). The last EVENTS are kept (in memory only). */
+    note(key, vars) {
+        this.events.unshift({ t: Date.now(), key: key, vars: vars || null });
+        if (this.events.length > EVENTS) this.events.pop();
+        if (this.log) this.log.info('easy entry: ' + key + (vars ? ' ' + JSON.stringify(vars) : ''));
     }
     enabled(mode) { return mode === 'demo' || mode === 'armed'; }
     /** Feed what the car (or the demo) says; mode is the app's easyEntry setting. */

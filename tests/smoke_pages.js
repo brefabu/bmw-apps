@@ -223,7 +223,9 @@ assert.strictEqual(app.easyEntry.state, 'IDLE');
 // position 1 can be saved from the seat list
 cv = drawPage(true, D0);
 assert.ok(cv.targets.indexOf('seat-save') >= 0, 'Save as position 1 is a target');
-// the request journal: opened from the seat list, back again
+// the request journal: opened from the seat list, back again; Easy Access events among the requests
+app.easyEntry.note('ee.carOff', { from: 10, to: 12 });
+app.easyEntry.note('ee.notNow', { state: 'OUT' });
 drawPage(true, D0, 'seat-log');
 assert.strictEqual(home.ui.view, 'seatlog');
 const nText = calls.length;

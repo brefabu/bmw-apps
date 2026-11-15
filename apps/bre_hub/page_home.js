@@ -45,7 +45,8 @@ function stepOffset(app, d) {
     app.settings.set('seatOffset', String(n));
 }
 // what a press can answer, shown under the seat list for a few seconds (the value: shown as a warning)
-const FOOT_NOTES = { 'ee.saved': false, 'ee.noPosition': true, 'ee.notParked': true, 'ee.otherMode': true, 'ee.noReturn': true };
+const FOOT_NOTES = { 'ee.saved': false, 'ee.noPosition': true, 'ee.notParked': true, 'ee.otherMode': true, 'ee.noReturn': true,
+    'ee.notNow': true };
 
 /** The line under the seat list: the state, demo or armed, and why the real seat stopped. */
 function seatFoot(app, ee, mode) {
@@ -119,14 +120,19 @@ function rows(app, parked) {
     }
     if (ui.view === 'seatlog') {
         // the last requests to the car and what came back, newest first (docs/07, rule 7)
-        const j = app.journal ? app.journal() : [];
+        // the commands and what went wrong: a read that worked is left out (the probe polls: they would push
+        // the moves off the list)
+        const j = (app.journal ? app.journal() : []).filter((e) => !(e.result === 'ok' && /^22 /.test(e.req)));
+        // Easy Access's own events among them (the car switched off / started, and what came of it), by time
+        const ev = (app.easyEntry && app.easyEntry.events) || [];
         const two = (n) => (n < 10 ? '0' : '') + n;
         const hms = (t) => { const d = new Date(t); return two(d.getHours()) + ':' + two(d.getMinutes()) + ':' + two(d.getSeconds()); };
         return {
             list: [{ key: 'log-back', icon: 'back', label: T('seats.log'), run: () => show(app, 'seat', 'seat-log') }],
-            lines: j.length ? j.slice(0, LOG_LINES).map((e) => ({
+            lines: j.length || ev.length ? j.map((e) => ({ t: e.t,
                 text: hms(e.t) + '  ' + e.unit + ' ' + e.req + ': ' + e.result + ' (' + e.ms + ' ms)', warn: e.result !== 'ok',
-            })) : [{ text: T('log.empty') }],
+            })).concat(ev.map((e) => ({ t: e.t, text: hms(e.t) + '  ' + T(e.key, e.vars || undefined), warn: !!FOOT_NOTES[e.key] })))
+                .sort((a, b) => b.t - a.t).slice(0, LOG_LINES) : [{ text: T('log.empty') }],
             foot: null,
         };
     }

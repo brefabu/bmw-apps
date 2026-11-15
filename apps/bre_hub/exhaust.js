@@ -27,6 +27,12 @@
  *     (main.js: linkUp after the first look at the car). Otherwise a command leaves on a press, on a driving mode
  *     change while the driving mode is followed, on the hold's repeat and on the rpm guard handing the flap back.
  *   - Arming sends nothing for a manual choice: what was picked while simulated is dropped (OEM), press again.
+ *   - Only with the engine running (a live engine speed of ENGINE_ON_RPM or more): engine off, Open / Closed wait
+ *     and go when it starts ("Waits for the engine to run"); Auto goes only as the hand-back of something sent.
+ *     A command the DME refuses or leaves unanswered is NOT held (sent again every 15 s): it is tried once more
+ *     when the engine next starts, or on a press. (G30, 15.11.2026: a remembered Open sent every 15 s with the engine
+ *     off got NRC 22, then no answer - each unanswered one held the diagnostic link 3 s, and the seat's reads
+ *     meanwhile were turned away.)
  *   - One command at a time; OEM (the hand-back) is never dropped: pressed while another is in flight, it goes
  *     right after it.
  *   - Nothing is shown as done without the DME's echo; the flap's state is the DME's read-back or unknown.
@@ -37,6 +43,7 @@
 const MODES = ['OEM', 'OPEN', 'CLOSED'];
 const HYST = 500;
 const HOLD_MS = 15000;
+const ENGINE_ON_RPM = 400;      // a live engine speed from this up: the engine runs (kit/car.js reads less as stopped)
 
 // actualValueModeDrivingExperience (FES): 1-3 Sport, 4-6 Comfort, 7-9 Eco Pro, 10 Adaptive; the plug-in
 // hybrids' own numbers: 15 Sport, 16 Sport Individual, 23 Sport+, 28 Boost, 17 Hybrid, 19 Hybrid Comfort,
@@ -99,6 +106,8 @@ class Exhaust {
         this.nextAt = 0;
         this._timer = null;
         this._q = Promise.resolve();
+        this.waiting = false;         // armed: Open / Closed to send when the engine next runs (engine off, or refused)
+        this._engine = null;          // the engine running at the last tick (null: not looked yet)
         this._follow = this.following;
         // the choice made before the app last stopped (By driving mode is its own setting)
         const kept = upper(this.settings.get('exhaustMode'));
@@ -288,11 +297,26 @@ class Exhaust {
     }
 
     _over() { const r = this.rpm(), l = this.limit; return !!(l && r !== null && r > l); }
+    /** The engine runs: a live engine speed of ENGINE_ON_RPM or more. */
+    engineOn() { const r = this.rpm(); return r !== null && r !== undefined && r >= ENGINE_ON_RPM; }
     /** Armed, a limit set and no live engine speed: the guard can't see, so Closed is not held. */
     _blind() { return !!(this.armed && this.limit && this.rpm() === null); }
 
-    /** A few times a second: the Closed rpm guard and the no-rpm fail-safe. */
+    /** A few times a second: the engine starting or stopping, the Closed rpm guard and the no-rpm fail-safe. */
     tick() {
+        const on = this.engineOn(), started = on && this._engine === false;
+        this._engine = on;
+        if (this.armed && started && this.waiting) {
+            this.waiting = false;
+            this.log.info('exhaust: the engine runs: ' + this.effective());
+            return this.apply(true);
+        }
+        if (this.armed && !on && this.sent === 'OPEN') {
+            // the engine stopped while Open was held: no more repeats, the DME has the flap; Open again on the next start
+            this._stop(); this.sent = 'OEM'; this.waiting = true;
+            this.log.info('exhaust: the engine stopped: Open waits for the next start');
+            return Promise.resolve().then(() => this.onChange());
+        }
         if (this.source === 'press' && this.desired === 'CLOSED' && this._blind()) {
             this.rpmLost = true;
             this.desired = 'OEM';
@@ -324,9 +348,20 @@ class Exhaust {
             const eff = this.effective();
             if (!force && eff === this.sent) return;
             this._stop();
+            if (this.armed && !this.engineOn()) {
+                // the engine off (or its speed unknown): Open / Closed wait for it to run; Auto goes only as the
+                // hand-back of something sent
+                if (eff !== 'OEM') { this.waiting = true; this.sent = 'OEM'; this.log.info('exhaust: ' + eff + ' waits for the engine'); return; }
+                if (this.sent === 'OEM') { this.waiting = false; return; }
+            }
+            this.waiting = false;
             await this._setMode(eff);
             this.sent = eff;
-            if (eff !== 'OEM' && this.armed && this.holdOn) this._schedule();
+            if (eff !== 'OEM' && this.armed) {
+                // refused or unanswered: not held; once more when the engine next starts (or on a press)
+                if (this.accepted === false) { this.waiting = true; this.log.warn('exhaust: ' + eff + ' not taken: tried again when the engine next starts'); }
+                else if (this.holdOn) this._schedule();
+            }
         }).catch((e) => this.log.error('exhaust', e)).then(() => this.onChange());
         return this._q;
     }
@@ -338,7 +373,9 @@ class Exhaust {
             this._q = this._q.then(async () => {
                 const eff = this.effective();
                 if (eff === 'OEM' || eff !== this.sent || !this.armed || !this.holdOn) return;
+                if (!this.engineOn()) { this.waiting = true; this.sent = 'OEM'; return; }     // the engine stopped
                 await this._setMode(eff);
+                if (this.accepted === false) { this.waiting = true; this.log.warn('exhaust: hold of ' + eff + ' not taken: stopped'); return; }
                 this._schedule();
             }).catch((e) => this.log.error('exhaust hold', e)).then(() => this.onChange());
         }, this.holdMs);
@@ -358,6 +395,7 @@ class Exhaust {
         if (this.desired === 'CLOSED' && this.paused && this.why === 'nosignal') return { key: 'ex.pausedNoRpm', warn: true };
         if (this.desired === 'CLOSED' && this.paused) return { key: 'ex.pausedRpm', vars: { rpm: this.limit }, warn: true };
         if (this.armed && this.accepted === false) return { key: 'ex.notTaken', warn: true };
+        if (this.armed && this.waiting) return { key: 'ex.waitEngine', warn: false };
         if (!this.armed) return { key: 'ex.simulated', warn: false };
         if (this.sent !== 'OEM' && this.holdOn && this.nextAt) return { key: 'ex.holding', warn: false };
         return { key: 'ex.armed', warn: false };

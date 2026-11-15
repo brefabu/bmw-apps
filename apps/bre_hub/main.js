@@ -90,6 +90,7 @@ mgu.run({
         };
         const easyEntry = new seatsLib.EasyEntry(seats, positions, log);
         easyEntry.setOffset(settings.get('seatOffset'));
+        easyEntry.sync();                                  // an OUT kept from the other mode means nothing now
 
         // The page has its own list, with Settings in it: the kit's header keeps the app's name and no tabs
         // (the kit would add a Settings tab for BTN_SETTINGS, which stays in app.json for the HMI's own bar).
@@ -135,15 +136,9 @@ mgu.run({
             if (st === undefined || st === null || st === lastState) return;
             const prev = lastState;
             lastState = st;
-            if (prev === null) return;
             const mode = settings.get('easyEntry'), ok = mode === 'armed' ? parkedStrict() : !parked.moving();
-            if (prev !== 10 && st === 10) {
-                log.info('seat easy access: the car started (vehicle state ' + prev + ' -> 10), parked ' + ok + ', ' + easyEntry.state);
-                easyEntry.carStarted(mode, ok);
-            } else if (prev === 10 && st !== 10) {
-                log.info('seat easy access: the car switched off (vehicle state 10 -> ' + st + '), parked ' + ok + ', ' + easyEntry.state);
-                easyEntry.carStopped(mode, ok);
-            }
+            const what = easyEntry.vehicleState(prev, st, mode, ok);
+            if (what) log.info('seat easy access: ' + what + ' (vehicle state ' + prev + ' -> ' + st + '), parked ' + ok + ', ' + easyEntry.state);
             repaint();
         }, 250);
         // the exhaust's Closed guard, also while the app is not on screen
@@ -181,7 +176,7 @@ mgu.run({
             if (k === 'language') text.setLanguage(settings.get('language'));
             if (k === 'seatOffset') easyEntry.setOffset(settings.get('seatOffset'));
             // any change of the mode (off / demo / armed) stops whatever seat move runs
-            if (k === 'easyEntry') { easyEntry.manual(); seats.stop('driver'); }
+            if (k === 'easyEntry') { easyEntry.manual(); seats.stop('driver'); easyEntry.sync(); }
             if (EXHAUST_KEYS.indexOf(k) >= 0) {
                 Promise.resolve(k === 'exhaustArm' ? exhaust.refresh() : null)
                     .then(() => exhaust.settingsChanged(k))
