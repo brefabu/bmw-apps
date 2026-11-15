@@ -49,6 +49,7 @@ const HALL_PAUSE_MS = 300;       // tried again while the transport says busy: m
 const MIN_STEP = 3;              // counts a poll must move for a direction sample
 const VOTES = 2;                 // agreeing samples (and twice the disagreeing ones) to learn a direction
 const HALL_MIN = 8192, HALL_MAX = 57344;
+const LEN = { 0xD702: 22, 0xD712: 19 };      // reply data lengths (SGBD RES tables), until a single read shows them
 const SPEED_MIN = 0.002, SPEED_MAX = 1;      // counts per ms a seat speed may have (2 .. 1000 counts per second)
 const TRAVEL_FILE = 'bre_seat_travel.json';
 
@@ -98,6 +99,8 @@ class SeatLink {
     /** link: the DmeLink (its diag and available, once init() ran). */
     constructor(link, log) {
         this.link = link; this.log = log;
+        this.multi = null;            // two identifiers in one read: null not tried yet, true works, false one at a time
+        this.len = {};                // each identifier's reply length, as seen
     }
 
     get available() { return !!(this.link && this.link.available && this.link.diag); }
@@ -108,8 +111,65 @@ class SeatLink {
      */
     async read(did, timeoutMs, quick) {
         if (READS.indexOf(did) < 0) return { ok: false, nrc: null, reason: 'not a read BRE Hub makes' };
+        const r = await this._request([did >> 8, did & 0xFF], timeoutMs, quick);
+        if (r.ok) {
+            r.data = r.reply.slice(3);
+            // a length unlike the SGBD's: the combined read is worth one more try, split by what was seen
+            if (this.len[did] !== r.data.length && r.data.length !== LEN[did] && this.multiWhy === 'layout') this.multi = null;
+            this.len[did] = r.data.length;
+        }
+        return r;
+    }
+
+    /**
+     * The position and the seat's switches in ONE request (22 D702 D712: one round trip instead of two). Resolves
+     * { ok, hall, switches } or { ok: false, reason }. A module that refuses two identifiers at once, or answers in
+     * another layout, is asked one at a time from then on (this.multi false), as before.
+     */
+    async readBoth(timeoutMs, quick) {
+        if (this.multi !== false) {
+            const r = await this._request([0xD7, 0x02, 0xD7, 0x12], timeoutMs, quick);
+            if (r.ok) {
+                const parts = this._split(r.reply, [DID.HALL, DID.SWITCHES]);
+                if (parts) {
+                    if (this.multi !== true) this.log.info('seat: position and switches read in one request');
+                    this.multi = true;
+                    return { ok: true, hall: parseHall(parts[DID.HALL]), switches: parseSwitches(parts[DID.SWITCHES]) };
+                }
+                this.multi = false; this.multiWhy = 'layout';
+                this.log.warn('seat: two identifiers in one read came back in another layout (' + r.reply.length + ' bytes): one at a time');
+            } else if (r.nrc !== null && r.nrc !== undefined) {
+                this.multi = false; this.multiWhy = 'refused';
+                this.log.warn('seat: two identifiers in one read refused (' + r.reason + '): one at a time');
+            } else return { ok: false, reason: r.reason };                         // no answer: nothing learned
+        }
+        const h = await this.read(DID.HALL, timeoutMs, quick);
+        if (!h.ok) return { ok: false, reason: h.reason };
+        const s = await this.read(DID.SWITCHES, timeoutMs, quick);
+        return { ok: true, hall: parseHall(h.data), switches: s.ok ? parseSwitches(s.data) : null };
+    }
+
+    /** 62 <DID> <data> <DID> <data> ... by each identifier's length (seen in a single read, else the SGBD's). */
+    _split(reply, dids) {
+        if (!reply || reply[0] !== 0x62) return null;
+        const out = {};
+        let at = 1;
+        for (const did of dids) {
+            const len = this.len[did] || LEN[did];
+            if (reply[at] !== did >> 8 || reply[at + 1] !== (did & 0xFF) || reply.length < at + 2 + len) return null;
+            out[did] = reply.slice(at + 2, at + 2 + len);
+            at += 2 + len;
+        }
+        return at === reply.length ? out : null;
+    }
+
+    /** A 22 request (one or more of READS) to the seat module: { ok, reply } or { ok: false, nrc, reason }. */
+    async _request(req, timeoutMs, quick) {
+        for (let i = 0; i < req.length; i += 2) {
+            if (READS.indexOf((req[i] << 8) | req[i + 1]) < 0) return { ok: false, nrc: null, reason: 'not a read BRE Hub makes' };
+        }
         if (!this.available) return { ok: false, nrc: null, reason: 'no diagnostic link' };
-        const diag = this.link.diag, req = [did >> 8, did & 0xFF], quiet = diag.quiet;
+        const diag = this.link.diag, quiet = diag.quiet;
         diag.quiet = true;                      // polled while the probe is open: our own log lines say what matters
         try {
             // the transport turns a request away while it is busy with the one before: a few quick tries
@@ -117,11 +177,12 @@ class SeatLink {
             // busy: tried again after 100, 200, 300, 400 ms (a move: once, after 100 ms)
             // (the call to the transport itself keeps the kit's wait: cut short, the transport went on with the
             // request while the next ones came, and turned them all away)
-            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || (quick ? 1000 : 2000), replyTo(0x22, req),
+            // the module answers in ~180 ms (G30): a second is plenty
+            const reply = await diag.physical(FAS, 0x22, req, timeoutMs || 1000, replyTo(0x22, req),
                 quick ? { maxRetries: 1, retryBaseMs: 100, callTimeoutMs: 3000 } : { maxRetries: 4, retryBaseMs: 100 });
             if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
             if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
-            if (reply[0] === 0x62) return { ok: true, data: reply.slice(3) };
+            if (reply[0] === 0x62) return { ok: true, reply: reply };
             return { ok: false, nrc: null, reason: 'unexpected ' + hex(reply[0]) };
         } catch (e) {
             return { ok: false, nrc: null, reason: String(e && e.message || e) };
@@ -363,10 +424,18 @@ class SeatProbe {
             this.log.info('seat probe: module found; motors ' + JSON.stringify(this.config) + ' (2 = with a position sensor); ' +
                 'initialised ' + (this.init ? JSON.stringify(this.init) : 'unread: ' + i.reason));
         }
+        // the position and the switches in one request (readBoth), tried HALL_TRIES times
         const before = this.hall;
-        const fresh = await this._readHall();
-        const s = await this.seat.read(DID.SWITCHES);
-        this.switches = s.ok ? parseSwitches(s.data) : null;
+        let both = null;
+        for (let i = 0; i < HALL_TRIES; i++) {
+            if (i) await this.wait(HALL_PAUSE_MS);
+            both = await this.seat.readBoth();
+            if (both.ok) break;
+        }
+        const fresh = both.ok;
+        if (fresh) { this.hall = both.hall; this.hallAt = Date.now(); this.hallError = null; } else this.hallError = both.reason || 'not read';
+        this.switches = fresh ? both.switches : null;
+        const s = { ok: !!this.switches, reason: both.reason };
         // the motors only while something moves (the counter changed or a switch is held): fewer requests
         const moved = fresh && before && Object.keys(AXES).some((a) => this.hall[a] !== null && before[a] !== null && this.hall[a] !== before[a]);
         let m = { ok: false, reason: 'not asked' };

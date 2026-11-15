@@ -49,6 +49,7 @@ function pace(diag) {
     const raw = diag.physical.bind(diag);
     let chain = Promise.resolve(), next = 0;
     diag.journal = [];
+    diag.lastAt = {};             // unit -> when a request to it last ended (seat_drive.js: tester present only when idle)
     diag.physical = function () {
         const args = arguments, urgent = !!(args[5] && args[5].urgent);
         let t0 = 0;
@@ -75,6 +76,7 @@ const UNITS = { 0x12: 'DME', 0x6D: 'FAS' };
  */
 function note(diag, args, reply, err, t0) {
     const target = args[0], sid = args[1], data = Array.isArray(args[2]) ? args[2] : [];
+    if (diag.lastAt) diag.lastAt[target] = Date.now();
     const req = hex(sid) + ' ' + (sid === 0x22 || sid === 0x2E ? data.slice(0, 2).map((x) => hex(x)).join('') + (data.length > 2 ? ' ' : '') +
         data.slice(2).map((x) => hex(x)).join(' ') : data.map((x) => hex(x)).join(' '));
     let result;

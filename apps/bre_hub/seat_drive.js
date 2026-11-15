@@ -147,8 +147,22 @@ class SeatDrive {
         clearInterval(this._keep); this._keep = null;
         if (!on) { this.extended = false; return; }
         if (!this.extended) return;
-        this._keep = setInterval(() => { this._send(0x3E, [0x00], 500, 0).catch(() => {}); }, KEEPALIVE_MS);
+        this._keep = setInterval(() => this.keepTick(), KEEPALIVE_MS / 2);
         if (this._keep.unref) this._keep.unref();
+    }
+
+    /**
+     * One tester present (3E 00), only when nothing else went to the seat module for KEEPALIVE_MS (any request keeps
+     * the session) and none is on its way: they used to pile up in the queue behind a slow request (G30 journal).
+     */
+    keepTick() {
+        const diag = this.link && this.link.diag;
+        if (!this.extended || this._ka || !diag) return false;
+        const last = diag.lastAt && diag.lastAt[FAS];
+        if (last && Date.now() - last < KEEPALIVE_MS) return false;
+        this._ka = true;
+        this._send(0x3E, [0x00], 500, 0).catch(() => {}).then(() => { this._ka = false; });
+        return true;
     }
 
     /** STOP to both motors we drive, whatever happened before. */
@@ -178,18 +192,25 @@ class SeatMover {
     /** Stop what runs: a pulse sees it within GUARD_MS and sends STOP. */
     stop(reason) { if (this.busy) { this.aborted = true; this.reason = reason || 'stopped'; } }
 
-    /** The position with the motor stopped: tried READ_TRIES times; { slv, shv, ... } or null. */
+    /**
+     * The position with the motor stopped, and the seat's switches with it (one request: SeatLink.readBoth); tried
+     * READ_TRIES times. { slv, shv, ... } or null; the switches kept for _switchHeld().
+     */
     async _settled() {
+        this._switches = null;
         for (let i = 0; i < READ_TRIES; i++) {
             if (i) await this.wait(READ_PAUSE_MS);
-            const h = await this.seat.read(DID.HALL);
-            if (h.ok) return parseHall(h.data);
+            const b = this.seat.readBoth ? await this.seat.readBoth() : null;
+            if (b && b.ok) { this._switches = b.switches; return b.hall; }
+            if (!b) { const h = await this.seat.read(DID.HALL); if (h.ok) return parseHall(h.data); }
         }
         return null;
     }
 
-    /** A seat switch held right now (null: not read). */
+    /** A seat switch held, as the last check read it (null: not read). No request of its own. */
     async _switchHeld() {
+        if (this._switches) return this._switches.pressed;
+        if (this.seat.readBoth) return null;
         const s = await this.seat.read(DID.SWITCHES);
         return s.ok ? parseSwitches(s.data).pressed : null;
     }
@@ -424,9 +445,8 @@ class RealBackend {
         const back = target.fore !== null && target.fore !== undefined && target.fore >= now.fore;
         if (back) { if (fore !== null) steps.push(['slv', fore]); if (height !== null) steps.push(['shv', height]); }
         else { if (height !== null) steps.push(['shv', height]); if (fore !== null) steps.push(['slv', fore]); }
-        const ok = await this.mover.run(steps, opts);
-        await this.probe.tick().catch(() => {});
-        return ok;
+        // (no read after the move: its checks keep the position; one right after 10 01 went unanswered on the G30)
+        return this.mover.run(steps, opts);
     }
 
     stop() { this.mover.stop('stopped'); }

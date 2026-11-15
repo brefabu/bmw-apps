@@ -286,6 +286,54 @@ Promise.resolve()
     await busy.physical(0x6D, 0x22, [0xD7, 0x02]).catch(() => {});
     assert.strictEqual(busy.journal[0].result, 'busy');
 }))
+.then(() => test('position and switches in one request; a module that cannot: one at a time, remembered', async () => {
+    const both = (reply) => {
+        const sent = [];
+        const diag = { quiet: false, async physical(target, sid, data, timeoutMs, accept) {
+            sent.push(data.slice());
+            if (data.length === 4) return typeof reply === 'function' ? reply() : reply;
+            const did = (data[0] << 8) | data[1];
+            return [0x62, data[0], data[1]].concat(did === 0xD702 ? hall(33068, 32523) : SW_NONE);
+        } };
+        return { seat: new L.SeatLink(linkOf(diag), quiet), sent: sent };
+    };
+    // the module answers both: one request
+    let x = both([0x62, 0xD7, 0x02].concat(hall(33068, 32523), [0xD7, 0x12], SW_SLV_BACK));
+    let r = await x.seat.readBoth();
+    assert.ok(r.ok && r.hall.slv === 33068 && r.switches.pressed === true);
+    assert.strictEqual(x.sent.length, 1);
+    assert.strictEqual(x.seat.multi, true);
+    // refused (NRC 13, length): one at a time from then on
+    x = both([0x7F, 0x22, 0x13]);
+    r = await x.seat.readBoth();
+    assert.ok(r.ok && r.hall.shv === 32523 && r.switches.pressed === false);
+    assert.strictEqual(x.seat.multi, false);
+    await x.seat.readBoth();
+    assert.deepStrictEqual(x.sent.map((d) => d.length), [4, 2, 2, 2, 2], 'not tried again');
+    // another layout (a shorter D702): one at a time too, never a wrong position
+    x = both([0x62, 0xD7, 0x02].concat(hall(33068, 32523).slice(0, 16), [0xD7, 0x12], SW_NONE));
+    r = await x.seat.readBoth();
+    assert.ok(r.ok && r.hall.slv === 33068);
+    assert.strictEqual(x.seat.multi, false);
+    // a module whose D702 is really 16 bytes: the combined read tried again with the length a single read showed
+    const short16 = hall(33068, 32523).slice(0, 16);
+    const sent16 = [];
+    const seat16 = new L.SeatLink(linkOf({ quiet: false, async physical(target, sid, data) {
+        sent16.push(data.length);
+        if (data.length === 4) return [0x62, 0xD7, 0x02].concat(short16, [0xD7, 0x12], SW_NONE);
+        return [0x62, data[0], data[1]].concat(data[1] === 0x02 ? short16 : SW_NONE);
+    } }), quiet);
+    await seat16.readBoth();
+    assert.strictEqual(seat16.multi, null, 'the 16-byte position seen: one more try');
+    r = await seat16.readBoth();
+    assert.ok(r.ok && r.hall.slv === 33068);
+    assert.strictEqual(seat16.multi, true, 'split by the length seen: works');
+    // no answer: nothing learned, still tried both next time
+    x = both(null);
+    r = await x.seat.readBoth();
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(x.seat.multi, null);
+}))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');
     const calls = src.match(/physical\([^)]*\)/g) || [];

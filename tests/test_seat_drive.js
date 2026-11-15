@@ -52,6 +52,16 @@ function fakeModule(o) {
         });
     };
     const answer = (sid, data) => {
+        if (sid === 0x22 && data.length > 2) {
+            // several identifiers in one read: 62 <DID> <data> <DID> <data> ...
+            let out = [0x62];
+            for (let i = 0; i < data.length; i += 2) {
+                const one = answer(0x22, [data[i], data[i + 1]]);
+                if (one[0] !== 0x62) return one;
+                out = out.concat(one.slice(1));
+            }
+            return out;
+        }
         if (sid === 0x22) {
             const did = (data[0] << 8) | data[1];
             const pos = (did === 0xD702) ? be16(Math.round(m.slv)).concat(be16(Math.round(m.shv)), be16(32390), new Array(16).fill(0))
@@ -123,7 +133,7 @@ function rig(mod, o) {
 function onlyAllowed(mod) {
     mod.sent.forEach((s) => {
         assert.strictEqual(s.target, 0x6D);
-        if (s.sid === 0x22) assert.ok(L.READS.indexOf((s.data[0] << 8) | s.data[1]) >= 0, 'a listed read');
+        if (s.sid === 0x22) for (let i = 0; i < s.data.length; i += 2) assert.ok(L.READS.indexOf((s.data[i] << 8) | s.data[i + 1]) >= 0, 'a listed read');
         else if (s.sid === 0x2E) {
             assert.deepStrictEqual(s.data.slice(0, 2), [0xD7, 0x08], 'only D708');
             assert.ok(s.data[2] === 0 || s.data[2] === 1, 'only fore / aft and height');
@@ -282,6 +292,32 @@ Promise.resolve()
     assert.ok(near(mod.slv, 33100, Drv.TOLERANCE), String(mod.slv));
     assert.ok(most <= 33100 + Drv.TOLERANCE, 'never past the driving position toward the wheel: ' + Math.round(most));
     onlyAllowed(mod);
+}))
+.then(() => test('a check after a pulse is ONE request: the position and the switches together', async () => {
+    const mod = fakeModule({ slv: 33100 });
+    const r = rig(mod);
+    await r.probe.tick();
+    const before = mod.sent.length;
+    assert.strictEqual(await r.mover.run([['slv', 32801]], { coarse: true }), true, r.mover.reason);
+    const reads = mod.sent.slice(before).filter((s) => s.sid === 0x22);
+    assert.ok(reads.length >= 1 && reads.every((s) => s.data.length === 4 && s.data[1] === 0x02 && s.data[3] === 0x12), 'only 22 D702 D712');
+    assert.strictEqual(r.probe.seat.multi, true);
+    onlyAllowed(mod);
+}))
+.then(() => test('tester present only when the seat module was idle 2 s, and never two queued', async () => {
+    const mod = fakeModule();
+    const link = { diag: mod.diag, available: true };
+    const drive = new Drv.SeatDrive(link, quiet);
+    mod.diag.lastAt = {};
+    assert.strictEqual((await drive.begin()).ok, true);
+    drive.keep(false); drive.extended = true;                     // (no timer: ticks by hand)
+    mod.diag.lastAt[0x6D] = Date.now();
+    assert.strictEqual(drive.keepTick(), false, 'a request just went: the session is kept by it');
+    mod.diag.lastAt[0x6D] = Date.now() - 3000;
+    assert.strictEqual(drive.keepTick(), true, 'idle: one 3E');
+    assert.strictEqual(drive.keepTick(), false, 'and not a second while it is on its way');
+    await new Promise((res) => setTimeout(res, 5));
+    assert.strictEqual(mod.sent.filter((s) => s.sid === 0x3E).length, 1);
 }))
 .then(() => test('the background watch reads only the position: one request', async () => {
     const mod = fakeModule({ slv: 33000 });
