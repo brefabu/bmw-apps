@@ -8,9 +8,10 @@
  *                                    0x01 PLUS (forward / up), 0x02 MINUS (back / down); PWM 100 %
  *                                    (SGBD FAS_G11: MOTOR, ARG_0xD708_D, TAB_MOTOR_AKTION)
  *   10 03                            the extended session, opened before a move (the seat module's workshop jobs run
- *                                    in it: docs/07), and 3E 00 (tester present) every 2 s while the move runs
+ *                                    in it: docs/07), and 3E 00 (tester present) when the module was idle 2 s while
+ *                                    the move runs - never while a motor runs
  *   10 01                            back to the default session when the move ends, whatever happened (it ends any
- *                                    tester control); else the module drops back by itself ~5 s after the last 3E
+ *                                    tester control); else the module drops back by itself after its session time
  * Never: the backrest or any other motor, the Hall counter reset (D722), coding, routines, security access.
  *
  * A move works by the seat's SPEED (Fabian's idea, 15.11.2026): on the G30 the position could not be read while a
@@ -25,7 +26,13 @@
  *     GUARD_MS: Stop pressed, the car not parked (guard()), the command refused - any of them sends STOP at once.
  *   - After each pulse: the wrong way drops the direction and stops; a seat that did not move stops ("the seat did
  *     not move") unless it is at the target (an end stop); a seat switch held stops (they win).
- *   - STOP is always sent after a pulse; a pulse never runs past MAX_PULSE_MS.
+ *   - STOP is always sent after a pulse, and sent again until the module answers it (a link that turns it away as
+ *     busy included); a STOP never confirmed ends the move (10 01 then, which ends any tester control). A pulse never
+ *     runs past MAX_PULSE_MS.
+ *   - While a motor runs, nothing but the move's own commands goes out (dme_link.js pace holds the rest): no tester
+ *     present, no read, no exhaust request. G30, 15.11.2026, 13:30:50: a tester present sent during a pulse went
+ *     unanswered, the link then turned the STOP away as busy, and the STOP was not sent again - the seat ran on
+ *     forward until it was corrected back at 13:31:00.
  */
 const { hex, NRC, replyTo } = require('./kit/diag');
 const { FAS, DID, parseHall, parseSwitches } = require('./seat_link');
@@ -45,7 +52,8 @@ const END_EXTRA = 1.15;         // a target at the end of the travel (fully down
                                 // seat's own end stop ends it, the "short of the target" of an end stop is avoided
 const MAX_PULSES = 4;           // per axis and move
 const MIN_PULSE_MS = 120;       // a motor needs about this long to move at all
-const MAX_PULSE_MS = 8000;      // no pulse runs longer (the whole travel takes ~10 s)
+const MAX_PULSE_MS = 4000;      // no pulse runs longer: under the module's session time (5 s is usual), so without a
+                                // tester present while it runs, the module's own session ends a motor a STOP missed
 const SETTLE_MS = 250;          // after STOP, before the position is read
 const GUARD_MS = 50;            // how often a pulse checks Stop and parked (no request: local state)
 const TEST_MS = 1000;           // the speed test's pulse per direction
@@ -56,13 +64,18 @@ const READ_PAUSE_MS = 1000;     // ... this far apart (the motor is stopped: wai
 const BEGIN_TRIES = 3;          // the extended session asked this often while the link is busy ...
 const BEGIN_PAUSE_MS = 1500;    // ... this far apart
 const STOP_MS = 3000;           // a STOP's answer is waited for this long, and an unanswered STOP sent again
-const STOP_SENDS = 3;           // up to this many times
+const STOP_SENDS = 8;           // up to this many times, turned away as busy or unanswered (each send itself tries a
+const STOP_PAUSE_MS = 250;      // busy link 5 times, ~1.5 s): ~15 s at most, longer than the link stays busy (~5-8 s)
+const END_SENDS = 6;            // 10 01 at the end, the same way
+const STEADY_MS = 1000;         // a pulse at least this long shows the seat's speed in this move (load included)
 const PULSE_ANSWER_MS = 300;    // a PLUS / MINUS answer is waited for this long only (the pulse is timed anyway)
 const KEEPALIVE_MS = 2000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bytes = (b) => b.map((x) => hex(x)).join(' ');
 const other = (a) => (a === 'plus' ? 'minus' : 'plus');
+/** Why a STOP's result ends the move: not answered (or refused) - null when it was taken. */
+const stopWhy = (r) => (!r || r.ok ? null : (r.nrc !== null && r.nrc !== undefined ? 'STOP refused: ' : 'STOP not confirmed: ') + r.reason);
 
 /** The writes, and the session they need. */
 class SeatDrive {
@@ -72,7 +85,11 @@ class SeatDrive {
         this.link = link; this.log = log;
         this.wait = (o && o.sleep) || sleep;
         this.extended = false; this._keep = null;
+        this.running = {};              // axis -> true from its PLUS / MINUS until its STOP is answered
     }
+
+    /** A motor of ours may run (a PLUS / MINUS sent, its STOP not answered yet). */
+    motorOn() { return Object.keys(this.running).some((a) => this.running[a]); }
 
     get available() { return !!(this.link && this.link.available && this.link.diag); }
 
@@ -81,8 +98,11 @@ class SeatDrive {
      * the pause the shared link takes after an unanswered request (dme_link.js pace), only its turn.
      */
     async _send(sid, data, timeoutMs, tries, urgent) {
-        const reply = await this.link.diag.physical(FAS, sid, data, timeoutMs || 1500, replyTo(sid, data),
-            { maxRetries: tries === undefined ? 2 : tries, retryBaseMs: 100, urgent: !!urgent });
+        const diag = this.link.diag;
+        diag.motorOn = () => this.motorOn();             // the shared link holds everything else while a motor runs
+        // move: the move's own request, never held back by the shared link
+        const reply = await diag.physical(FAS, sid, data, timeoutMs || 1500, replyTo(sid, data),
+            { maxRetries: tries === undefined ? 2 : tries, retryBaseMs: 100, urgent: !!urgent, move: true });
         if (!reply || !reply.length) return { ok: false, nrc: null, reason: 'timeout' };
         if (reply[0] === 0x7F) return { ok: false, nrc: reply[2], reason: NRC[reply[2]] || ('NRC ' + hex(reply[2])) };
         if (reply[0] === sid + 0x40) return { ok: true };
@@ -91,8 +111,9 @@ class SeatDrive {
 
     /**
      * One motor command: axis 'slv' | 'shv', action 'plus' | 'minus' | 'stop'. Resolves { ok, nrc, reason }.
-     * A STOP waits long for its answer and is sent again unanswered; a PLUS / MINUS waits PULSE_ANSWER_MS once
-     * (a pulse is timed from the command whether or not it is answered).
+     * A PLUS / MINUS waits PULSE_ANSWER_MS once (a pulse is timed from the command whether or not it is answered).
+     * A STOP waits long for its answer and is sent again - unanswered, or turned away by a busy link (0.4.6 sent it
+     * once then: G30, 13:30:52) - up to STOP_SENDS times, STOP_PAUSE_MS apart, until the module answers it.
      */
     async motor(axis, action) {
         if (!Object.prototype.hasOwnProperty.call(MOTOR, axis) || !Object.prototype.hasOwnProperty.call(ACTION, action)) {
@@ -102,20 +123,23 @@ class SeatDrive {
         const data = [0xD7, 0x08, MOTOR[axis], ACTION[action], PWM];
         this.log.info('seat: UDS -> FAS 2E ' + bytes(data) + ' (' + axis + ' ' + action + ')');
         const stop = action === 'stop';
+        if (!stop) this.running[axis] = true;           // from now on it may run, answered or not
         const tries = stop ? 5 : 2, sends = stop ? STOP_SENDS : 1, waitMs = stop ? STOP_MS : PULSE_ANSWER_MS;
-        try {
-            let r = null;
-            for (let i = 0; i < sends; i++) {
+        let r = null;
+        for (let i = 0; i < sends; i++) {
+            if (i) { this.log.warn('seat: ' + axis + ' stop not answered (' + r.reason + '): sent again'); await this.wait(STOP_PAUSE_MS); }
+            try {
                 r = await this._send(0x2E, data, waitMs, tries, stop);
-                if (r.ok || (r.nrc !== null && r.nrc !== undefined)) break;          // answered: taken or refused
-                if (i + 1 < sends) this.log.warn('seat: ' + axis + ' ' + action + ' unanswered (' + r.reason + '): sent again');
+            } catch (e) {
+                r = { ok: false, nrc: null, reason: String(e && e.message || e).replace(/^transport refused: /, '') };
             }
-            if (!r.ok) this.log.warn('seat: ' + axis + ' ' + action + ' not taken: ' + r.reason);
-            return r;
-        } catch (e) {
-            this.log.warn('seat: ' + axis + ' ' + action + ': ' + String(e && e.message || e));
-            return { ok: false, reason: String(e && e.message || e) };
+            if (r.ok || (r.nrc !== null && r.nrc !== undefined)) break;          // answered: taken or refused
         }
+        // a STOP answered (taken, or refused: the module's control has ended) - or given up on: the move ends then,
+        // and 10 01 follows; the other requests are held no longer
+        if (stop) this.running[axis] = false;
+        if (!r.ok) this.log.warn('seat: ' + axis + ' ' + action + ' not taken: ' + r.reason);
+        return r;
     }
 
     /** The extended session (10 03); kept with tester present only while a move runs (keep()). */
@@ -150,7 +174,14 @@ class SeatDrive {
         this.keep(false);
         if (!was || !this.available) return;
         this.log.info('seat: UDS -> FAS 10 01 (default session)');
-        try { await this._send(0x10, [0x01], 3000, 4, true); } catch (e) { this.log.warn('seat: default session: ' + e); }
+        // sent again while the link turns it away: it ends any tester control (a STOP missed included)
+        for (let i = 0; i < END_SENDS; i++) {
+            if (i) await this.wait(STOP_PAUSE_MS);
+            try {
+                const r = await this._send(0x10, [0x01], 3000, 4, true);
+                if (r.ok || (r.nrc !== null && r.nrc !== undefined)) return;
+            } catch (e) { this.log.warn('seat: default session: ' + e); }
+        }
     }
 
     /**
@@ -171,7 +202,8 @@ class SeatDrive {
      */
     keepTick() {
         const diag = this.link && this.link.diag;
-        if (!this.extended || this._ka || !diag) return false;
+        // never while a motor runs: unanswered, it would hold the link and the STOP behind it (G30, 13:30:50)
+        if (!this.extended || this._ka || !diag || this.motorOn()) return false;
         const last = diag.lastAt && diag.lastAt[FAS];
         if (last && Date.now() - last < KEEPALIVE_MS) return false;
         this._ka = true;
@@ -247,9 +279,17 @@ class SeatMover {
         }
         await cmd;                                       // (its answer is waited for PULSE_ANSWER_MS at most)
         const ran = this.now() - t0;
-        await this.drive.motor(axis, 'stop');
+        const st = await this.drive.motor(axis, 'stop');
         if (!why && w && !w.ok && w.nrc !== null && w.nrc !== undefined) why = 'command refused: ' + w.reason;
+        const bad = stopWhy(st);
+        if (bad) { why = bad; this._lost(); }
         return { why: why, ran: ran };
+    }
+
+    /** A STOP not confirmed: where the seat is, is not known (the next move reads first). */
+    _lost() {
+        if (this.probe.hall) this.probe.hallAt = 0;
+        this.log.warn('seat: a STOP was not confirmed: the move ends, the session is closed');
     }
 
     /** The action that moves the axis's counter up (true) or down, from the learned direction; null unknown. */
@@ -287,6 +327,7 @@ class SeatMover {
         this.progress = { axis: axis, start: p, now: p, target: target, action: null, pulse: 0 };
         this.log.info('seat: ' + axis + ' ' + p + ' -> ' + target + (coarse ? ' (coarse, one way)' : ''));
         const firstUp = target > p;
+        const seen = {};                // the speed a pulse of STEADY_MS or more showed in this move, per action
         try {
             for (let i = 0; i < MAX_PULSES; i++) {
                 const d = target - p;
@@ -294,7 +335,7 @@ class SeatMover {
                 // one way (getting out): past the target is there, nothing goes back toward the wheel or up
                 if (coarse && i > 0 && (d > 0) !== firstUp) return true;
                 const up = d > 0, action = this._actionFor(axis, up);
-                const v = this.probe.speed(axis, action);
+                const v = seen[action] || this.probe.speed(axis, action);
                 if (!v) { this.reason = 'measure the seat speed first (Seat module)'; return false; }
                 const share = i === 0 && !coarse ? FIRST_SHARE : 1;
                 const ms = Math.round(Math.max(MIN_PULSE_MS, Math.min(MAX_PULSE_MS, Math.abs(d) * share / v * (toEnd ? END_EXTRA : 1))));
@@ -328,6 +369,7 @@ class SeatMover {
                     this.reason = 'the seat did not move'; return false;
                 }
                 this.probe.learnSpeed(axis, action, Math.abs(moved) / r.ran);
+                if (r.ran >= STEADY_MS) seen[action] = Math.abs(moved) / r.ran;
                 if (await this._switchHeld()) { this.reason = 'a seat switch was touched'; return false; }
                 p = q;
             }
@@ -355,7 +397,7 @@ class SeatMover {
         const stopIt = async (r) => {
             await r.cmd;                                 // (its answer is waited for PULSE_ANSWER_MS at most)
             r.e.ran = this.now() - r.start;
-            await this.drive.motor(r.e.axis, 'stop');
+            r.stopWhy = stopWhy(await this.drive.motor(r.e.axis, 'stop'));
             r.stopped = true;
         };
         for (;;) {
@@ -376,6 +418,9 @@ class SeatMover {
             await this.wait(Math.max(1, Math.min(GUARD_MS, left)));
         }
         for (const r of runs) if (!r.stopped) await stopIt(r);       // whatever ended it: every motor stopped
+        // a STOP not confirmed ends the move, whatever else happened (the seat may have run on: read before the next)
+        const bad = runs.filter((r) => r.stopWhy)[0];
+        if (bad) { why = bad.stopWhy; unsupported = false; this._lost(); }
         return { why: why, unsupported: unsupported };
     }
 
@@ -401,6 +446,9 @@ class SeatMover {
         }
         this.log.info('seat: together ' + axes.map((a) => a + ' ' + p[a] + ' -> ' + target[a]).join(', ') + (coarse ? ' (coarse, one way)' : ''));
         this.progress = { axis: axes[0], start: p[axes[0]], now: p[axes[0]], target: target[axes[0]], action: null, pulse: 0 };
+        // the speed a pulse of STEADY_MS or more showed in this move (the load on the seat included: 0.4.6 on the
+        // G30 fell ~30 % short of a get-in with the speed tested before), per axis and action: the corrections use it
+        const seen = {};
         try {
             for (let i = 0; i < MAX_PULSES; i++) {
                 const list = [];
@@ -408,7 +456,7 @@ class SeatMover {
                     const d = target[a] - p[a];
                     if (Math.abs(d) <= tol) continue;
                     if (coarse && i > 0 && (d > 0) !== firstUp[a]) continue;           // one way: past is there
-                    const up = d > 0, action = this._actionFor(a, up), v = this.probe.speed(a, action);
+                    const up = d > 0, action = this._actionFor(a, up), v = seen[a + action] || this.probe.speed(a, action);
                     if (!v) { this.reason = 'measure the seat speed first (Seat module)'; return false; }
                     const share = i === 0 && !coarse ? FIRST_SHARE : 1;
                     const ms = Math.round(Math.max(MIN_PULSE_MS, Math.min(MAX_PULSE_MS, Math.abs(d) * share / v * (toEnd[a] ? END_EXTRA : 1))));
@@ -450,6 +498,7 @@ class SeatMover {
                         target[e.axis] = q;
                     }
                     if (Math.abs(moved) >= MOVED && e.ran > 0) this.probe.learnSpeed(e.axis, e.action, Math.abs(moved) / e.ran);
+                    if (Math.abs(moved) >= MOVED && e.ran >= STEADY_MS) seen[e.axis + e.action] = Math.abs(moved) / e.ran;
                 }
                 for (const a of axes) if (h[a] !== null && h[a] !== undefined) p[a] = h[a];
                 this.progress.now = p[shown.axis];
@@ -615,4 +664,5 @@ class RealBackend {
     close() { this.mover.stop('closing'); }
 }
 
-module.exports = { SeatDrive, SeatMover, RealBackend, MOTOR, ACTION, PWM, TOLERANCE, COARSE_TOL, NEAR, TEST_MS, MAX_PULSES };
+module.exports = { SeatDrive, SeatMover, RealBackend, MOTOR, ACTION, PWM, TOLERANCE, COARSE_TOL, NEAR, TEST_MS, MAX_PULSES,
+    MAX_PULSE_MS, STOP_SENDS };

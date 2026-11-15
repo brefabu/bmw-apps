@@ -43,8 +43,9 @@ const be16 = (v) => [v >> 8, v & 0xFF];
 function fakeModule(o) {
     const m = Object.assign({ slv: 33100, shv: 32900, speed: SPEED, wiring: 1, switchHeld: false, stops: ENDS,
         silent: 0, silentDoes: false, refuse: null, ignore: false, sessionRefused: null, oneMotor: false }, o || {});
-    m.motor = { slv: 'stop', shv: 'stop' }; m.ext = false; m.sent = []; m.quiet = false;
+    m.motor = { slv: 'stop', shv: 'stop' }; m.ext = false; m.sent = []; m.quiet = false; m.t = 0;
     m.advance = (ms) => {
+        m.t += ms;
         ['slv', 'shv'].forEach((a) => {
             const d = m.motor[a] === 'plus' ? 1 : m.motor[a] === 'minus' ? -1 : 0;
             if (!d) return;
@@ -96,7 +97,8 @@ function fakeModule(o) {
     m.diag = {
         get quiet() { return m.quiet; }, set quiet(v) { m.quiet = v; },
         async physical(target, sid, data, timeoutMs, accept, opts) {
-            m.sent.push({ target: target, sid: sid, data: data.slice() });
+            m.sent.push({ target: target, sid: sid, data: data.slice(), t: m.t });
+            if (m.busyFor && m.busyFor(sid, data)) throw new Error('transport refused: APP_REQUEST_TEMPORARILY_NOT_ACCEPTED');
             const running = m.motor.slv !== 'stop' || m.motor.shv !== 'stop';
             // the point of the speed: nothing is read while a motor runs
             if (sid === 0x22) assert.ok(!running, 'a read while a motor runs: 22 ' + data.map((x) => x.toString(16)).join(' '));
@@ -147,6 +149,16 @@ function onlyAllowed(mod) {
     assert.deepStrictEqual(mod.motor, { slv: 'stop', shv: 'stop' }, 'both motors stopped at the end');
 }
 const writes = (mod) => mod.sent.filter((s) => s.sid === 0x2E).map((s) => (s.data[2] === 0 ? 'slv ' : 'shv ') + ['stop', 'plus', 'minus'][s.data[3]]);
+/** How long each motor ran: from its PLUS / MINUS to the STOP after it, in simulated ms. */
+const runs = (mod) => {
+    const on = {}, out = [];
+    mod.sent.filter((s) => s.sid === 0x2E).forEach((s) => {
+        const a = s.data[2];
+        if (s.data[3] !== 0) on[a] = s.t;
+        else if (on[a] !== undefined) { out.push(s.t - on[a]); delete on[a]; }
+    });
+    return out;
+};
 const sessions = (mod) => mod.sent.filter((s) => s.sid === 0x10).map((s) => s.data[0]);
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
@@ -208,7 +220,9 @@ Promise.resolve()
     await r.probe.tick();
     const now = r.backend.status().seats.driver.pos;
     assert.strictEqual(await r.backend.goTo('driver', S.exitPosition(now, 0.75), { coarse: true }), true, r.mover.reason);
-    assert.deepStrictEqual(writes(mod), ['slv minus', 'shv minus', 'slv stop', 'shv stop'], 'one pulse each, together, each stopped at its time');
+    // fore / aft in one pulse; fully down (~7 s) in two: no pulse runs past MAX_PULSE_MS (under the module's session time)
+    assert.deepStrictEqual(writes(mod), ['slv minus', 'shv minus', 'slv stop', 'shv stop', 'shv minus', 'shv stop'], 'together, each stopped at its time');
+    assert.ok(runs(mod).every((ms) => ms <= Drv.MAX_PULSE_MS + 60), 'no pulse longer than ' + Drv.MAX_PULSE_MS + ': ' + runs(mod));
     assert.ok(near(mod.slv, 32801, Drv.COARSE_TOL), String(mod.slv));
     assert.strictEqual(Math.round(mod.shv), 32473, 'fully down: the pulse ran into the end stop');
     onlyAllowed(mod);
@@ -502,7 +516,8 @@ Promise.resolve()
     assert.strictEqual(ee.carStopped('armed', true), true);
     await new Promise((res) => { const t = setInterval(() => { if (ee.state !== 'MOVING_OUT') { clearInterval(t); res(); } }, 5); });
     assert.strictEqual(ee.state, 'OUT', r.mover.reason);
-    assert.ok(near(mod.slv, 32801, Drv.TOLERANCE) && mod.shv <= 32473 + Drv.TOLERANCE, mod.slv + ' ' + mod.shv);
+    // getting out is coarse: within ~1 cm (COARSE_TOL) is there
+    assert.ok(near(mod.slv, 32801, Drv.COARSE_TOL) && mod.shv <= 32473 + Drv.TOLERANCE, mod.slv + ' ' + mod.shv);
     assert.strictEqual(new S.Positions(dir, quiet).flag('driver.real', 'out'), true, 'the OUT of the real seat, kept apart from the demo');
     assert.ok(new S.Positions(dir, quiet).get('driver.real', 'drive') && !new S.Positions(dir, quiet).get('driver', 'drive'));
     ee = new S.EasyEntry(r.backend, new S.Positions(dir, quiet), quiet);
@@ -534,6 +549,58 @@ Promise.resolve()
     mod.slv = 32700; await r.probe.tick();
     assert.strictEqual(await r.backend.goTo('driver', { fore: 0, height: kept.height, counts: { slv: 40000, shv: 32900 } }), true, r.mover.reason);
     assert.ok(mod.slv <= 33321 + Drv.TOLERANCE, 'not past the front end measured: ' + mod.slv);
+    onlyAllowed(mod);
+}))
+.then(() => test('a STOP turned away as busy is sent again until it goes (G30, 13:30:52), and the move goes on', async () => {
+    const mod = fakeModule({ slv: 32801, shv: 32900 });
+    let refused = 0;
+    mod.busyFor = (sid, data) => sid === 0x2E && data[3] === 0 && refused++ < 3;      // the first three STOPs: busy
+    const r = rig(mod);
+    assert.strictEqual(await r.mover.run([['slv', 33100]]), true, r.mover.reason);
+    const stops = mod.sent.filter((q) => q.sid === 0x2E && q.data[3] === 0);
+    assert.ok(stops.length >= 4, 'sent again: ' + stops.length);
+    assert.ok(near(mod.slv, 33100, Drv.TOLERANCE), String(mod.slv));
+    onlyAllowed(mod);
+}))
+.then(() => test('a STOP never answered: the move ends, 10 01 closes the session (it ends the tester control)', async () => {
+    const mod = fakeModule({ slv: 32801, shv: 32900 });
+    mod.busyFor = (sid, data) => sid === 0x2E && data[3] === 0;
+    const r = rig(mod);
+    await r.probe.tick();
+    assert.strictEqual(await r.mover.run([['slv', 33100]]), false);
+    assert.ok(/STOP not confirmed/.test(r.mover.reason), r.mover.reason);
+    assert.strictEqual(mod.sent.filter((q) => q.sid === 0x2E && q.data[3] === 0).length, Drv.STOP_SENDS, 'tried STOP_SENDS times');
+    assert.strictEqual(writes(mod).filter((w) => /plus|minus/.test(w)).length, 1, 'no motor command after it');
+    assert.strictEqual(sessions(mod).pop(), 0x01, 'the session closed');
+    assert.deepStrictEqual(mod.motor, { slv: 'stop', shv: 'stop' }, 'and with it the motor');
+    assert.strictEqual(r.probe.hallAt, 0, 'the position is not known any more: the next move reads first');
+    assert.strictEqual(r.mover.drive.motorOn(), false, 'the other requests are not held for ever');
+}))
+.then(() => test('no tester present while a motor runs; the shared link holds the other requests meanwhile', async () => {
+    const mod = fakeModule({});
+    const drive = new Drv.SeatDrive({ diag: mod.diag, available: true }, quiet, { sleep: () => Promise.resolve() });
+    drive.extended = true;
+    mod.diag.lastAt = { 0x6D: Date.now() - 5000 };
+    drive.running.slv = true;
+    assert.strictEqual(drive.keepTick(), false, 'a motor runs: no 3E');
+    drive.running.slv = false;
+    assert.strictEqual(drive.keepTick(), true, 'idle 5 s, motors stopped: 3E');
+    await drive.motor('shv', 'plus');
+    assert.strictEqual(typeof mod.diag.motorOn, 'function', 'the link is told');
+    assert.strictEqual(mod.diag.motorOn(), true);
+    await drive.motor('shv', 'stop');
+    assert.strictEqual(mod.diag.motorOn(), false);
+    assert.ok(mod.sent.filter((q) => q.sid === 0x2E).length === 2);
+}))
+.then(() => test('the corrections go by the speed this move showed (the seat slower with the driver on it)', async () => {
+    // the speed tested 0.07, the seat really 0.049: the first pulse falls ~30 % short; the correction by the kept
+    // (blended) speed would fall short again, by the speed just seen it lands
+    const mod = fakeModule({ slv: 32801, shv: 32900, speed: 0.049 });
+    const r = rig(mod);
+    r.probe.hallAt = Date.now();
+    assert.strictEqual(await r.mover.run([['slv', 33100]]), true, r.mover.reason);
+    assert.ok(near(mod.slv, 33100, Drv.TOLERANCE), String(mod.slv));
+    assert.strictEqual(writes(mod).filter((w) => w === 'slv plus').length, 2, 'one correction: ' + writes(mod));
     onlyAllowed(mod);
 }))
 .then(() => test('the file writes only D708, for fore / aft and height', () => {

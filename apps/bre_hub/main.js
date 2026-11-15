@@ -181,7 +181,8 @@ mgu.run({
         // the seat probe reads about once a second, only while its list is on screen (drawn in the last 2 s)
         let drawnAt = 0;
         setInterval(() => {
-            if (home.ui.view !== 'seatinfo' || Date.now() - drawnAt > 2000) return;
+            // (not while a move runs: its own checks read the seat, and nothing else should crowd the link)
+            if (home.ui.view !== 'seatinfo' || Date.now() - drawnAt > 2000 || mover.busy) return;
             seatProbe.tick().then(repaint).catch((e) => log.error('seat probe', e));
         }, 1000);
 

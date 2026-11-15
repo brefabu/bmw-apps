@@ -44,6 +44,7 @@ function fakeDiag(table) {
     return d;
 }
 const linkOf = (diag, available) => ({ diag: diag, available: available !== false });
+const hexs = (sid, data) => [sid].concat(data).map((x) => (x < 16 ? '0' : '') + x.toString(16)).join(' ');
 
 const be16 = (v) => [v >> 8, v & 0xFF];
 const CONFIG = [2, 2, 1, 0].concat(new Array(21).fill(0));                   // fore/aft, height with sensors; backrest motor only
@@ -311,6 +312,19 @@ Promise.resolve()
     const busy = pace({ async physical() { throw new Error('transport refused: APP_REQUEST_TEMPORARILY_NOT_ACCEPTED'); } });
     await busy.physical(0x6D, 0x22, [0xD7, 0x02]).catch(() => {});
     assert.strictEqual(busy.journal[0].result, 'busy');
+    // a seat motor running: the app's other requests wait (outside the queue), the move's own go
+    const order = [];
+    const held = pace({ async physical(target, sid, data) { order.push(hexs(sid, data)); return [sid + 0x40].concat(data); } });
+    let on = true;
+    held.motorOn = () => on;
+    const exhaust = held.physical(0x12, 0x22, [0x62, 0xFD]);
+    await new Promise((r) => setTimeout(r, 120));
+    assert.deepStrictEqual(order, [], 'held while the motor runs');
+    await held.physical(0x6D, 0x2E, [0xD7, 0x08, 0, 0, 100], 3000, null, { move: true, urgent: true });
+    assert.deepStrictEqual(order, ['2e d7 08 00 00 64'], 'the STOP went first');
+    on = false;
+    await exhaust;
+    assert.deepStrictEqual(order, ['2e d7 08 00 00 64', '22 62 fd'], 'then the rest');
 }))
 .then(() => test('position and switches in one request; a module that cannot: one at a time, remembered', async () => {
     const both = (reply) => {

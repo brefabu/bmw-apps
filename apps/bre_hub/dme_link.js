@@ -36,6 +36,7 @@ const GAP_MS = 25;              // between two requests (kit/runtime/readonly-di
 const COOL_MS = 1500;           // after a request the transport turned away (busy)
 const NO_ANSWER_COOL_MS = 4000; // after a request that got no answer: the transport goes on waiting for it ~5 s and turns
                                 // everything away meanwhile (G30 journal, 15.11.2026: no answer at 13:17:18, busy until :23)
+const HOLD_MAX_MS = 15000;      // a request held back while a seat motor runs waits at most this long
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -45,14 +46,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * time and at least GAP_MS after the one before, and a busy transport tried again soon (100, 200, 300 ... ms)
  * rather than after seconds. After a request without an answer, or turned away, the next waits COOL_MS - except
  * an urgent one (opts.urgent: a seat STOP), which still waits its turn but never the pause.
+ * While a seat motor may run (diag.motorOn(), seat_drive.js), nothing else of the app goes out - the exhaust, the
+ * probe, the background read: they wait, outside the queue, until the motor is stopped (HOLD_MAX_MS at most). Only
+ * the move's own requests (opts.move) go. One left unanswered would hold the link, and the STOP behind it (G30,
+ * 15.11.2026, 13:30:50: a tester present unanswered during a pulse, the STOP turned away as busy).
  */
 function pace(diag) {
     const raw = diag.physical.bind(diag);
     let chain = Promise.resolve(), next = 0;
     diag.journal = [];
     diag.lastAt = {};             // unit -> when a request to it last ended (seat_drive.js: tester present only when idle)
+    diag.motorOn = null;          // seat_drive.js: () => true while one of its motors may run
+    const held = () => !!(diag.motorOn && diag.motorOn());
     diag.physical = function () {
-        const args = arguments, urgent = !!(args[5] && args[5].urgent);
+        const args = arguments, o = args[5] || {};
+        if (o.move || !held()) return queued(args);
+        const t0 = Date.now();
+        return new Promise((res) => {
+            const check = () => (!held() || Date.now() - t0 > HOLD_MAX_MS ? res() : setTimeout(check, 50));
+            check();
+        }).then(() => queued(args));
+    };
+    function queued(args) {
+        const urgent = !!(args[5] && args[5].urgent);
         let t0 = 0;
         const run = () => sleep(urgent ? 0 : Math.max(0, next - Date.now()))
             .then(() => { t0 = Date.now(); return raw.apply(null, args); })
@@ -61,7 +77,7 @@ function pace(diag) {
         const p = chain.then(run, run);
         chain = p.catch(() => {});
         return p;
-    };
+    }
     diag.busyMs = 100;
     diag.busyLog = false;
     return diag;
@@ -165,4 +181,4 @@ class DmeLink {
     }
 }
 
-module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS, COOL_MS, NO_ANSWER_COOL_MS };
+module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS, COOL_MS, NO_ANSWER_COOL_MS, HOLD_MAX_MS };
