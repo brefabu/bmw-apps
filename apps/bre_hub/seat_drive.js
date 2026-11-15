@@ -51,8 +51,10 @@ const GUARD_MS = 50;            // how often a pulse checks Stop and parked (no 
 const TEST_MS = 1000;           // the speed test's pulse per direction
 const MOVED = 5;                // counts: less than this after a pulse is "did not move"
 const WRONG_WAY = 12;           // counts the wrong way that end a move and drop the direction
-const READ_TRIES = 3;           // a position read with the motor stopped is tried this often ...
-const READ_PAUSE_MS = 500;      // ... this far apart
+const READ_TRIES = 4;           // a position read with the motor stopped is tried this often ...
+const READ_PAUSE_MS = 1000;     // ... this far apart (the motor is stopped: waiting costs only time)
+const BEGIN_TRIES = 3;          // the extended session asked this often while the link is busy ...
+const BEGIN_PAUSE_MS = 1500;    // ... this far apart
 const STOP_MS = 3000;           // a STOP's answer is waited for this long, and an unanswered STOP sent again
 const STOP_SENDS = 3;           // up to this many times
 const PULSE_ANSWER_MS = 300;    // a PLUS / MINUS answer is waited for this long only (the pulse is timed anyway)
@@ -65,8 +67,10 @@ const other = (a) => (a === 'plus' ? 'minus' : 'plus');
 /** The writes, and the session they need. */
 class SeatDrive {
     /** link: the DmeLink (its diag and available, once init() ran). */
-    constructor(link, log) {
+    /** o (optional): { sleep(ms) } for the tests. */
+    constructor(link, log, o) {
         this.link = link; this.log = log;
+        this.wait = (o && o.sleep) || sleep;
         this.extended = false; this._keep = null;
     }
 
@@ -124,10 +128,20 @@ class SeatDrive {
         return r;
     }
 
-    /** Before a move: the extended session. Resolves { ok, reason }. */
+    /**
+     * Before a move: the extended session. A link that is busy (the transport turning requests away: right after the
+     * engine was started or stopped, G30) is tried again BEGIN_TRIES times, BEGIN_PAUSE_MS apart; a refusal or no
+     * answer from the module is not. Resolves { ok, reason }.
+     */
     async begin() {
         if (!this.available) return { ok: false, reason: 'no diagnostic link' };
-        try { return await this._session(); } catch (e) { return { ok: false, reason: String(e && e.message || e) }; }
+        let r = null;
+        for (let i = 0; i < BEGIN_TRIES; i++) {
+            if (i) { this.log.info('seat: the link was busy: the session asked again'); await this.wait(BEGIN_PAUSE_MS); }
+            try { return await this._session(); } catch (e) { r = { ok: false, reason: String(e && e.message || e) }; }
+            if (!/TEMPORARILY|BUSY/i.test(r.reason)) return r;
+        }
+        return r;
     }
 
     /** After a move (STOP already sent): tester present off and the default session (10 01). Never throws. */
@@ -324,6 +338,130 @@ class SeatMover {
         }
     }
 
+    /**
+     * Pulses on several axes at once: each motor's command sent (one after the other in the link's queue), each
+     * stopped at its own time; Stop, not parked or a refusal stop them all at once. Resolves { why, unsupported }:
+     * unsupported when a later motor was refused while an earlier one ran (two motors together not taken).
+     * Each entry gets ran (ms its motor ran).
+     */
+    async pulses(list) {
+        const runs = list.map((e) => ({ e: e, w: null, cmd: null, start: 0, stopped: false }));
+        let why = null, unsupported = false;
+        for (const r of runs) {
+            r.start = this.now();
+            r.cmd = this.drive.motor(r.e.axis, r.e.action).then((res) => { r.w = res; }, (err) => { r.w = { ok: false, reason: String(err) }; });
+        }
+        const refused = (r) => r.w && !r.w.ok && r.w.nrc !== null && r.w.nrc !== undefined;
+        const stopIt = async (r) => {
+            await r.cmd;                                 // (its answer is waited for PULSE_ANSWER_MS at most)
+            r.e.ran = this.now() - r.start;
+            await this.drive.motor(r.e.axis, 'stop');
+            r.stopped = true;
+        };
+        for (;;) {
+            const ref = runs.filter(refused)[0];
+            if (ref) {
+                if (ref !== runs[0] && runs[0].w && runs[0].w.ok) unsupported = true;
+                else why = 'command refused: ' + ref.w.reason;
+                break;
+            }
+            if (this.aborted) { why = this.reason || 'stopped'; break; }
+            if (!this.guard()) { why = 'not allowed now'; break; }
+            for (const r of runs) {
+                if (!r.stopped && this.now() - r.start >= r.e.ms) await stopIt(r);
+            }
+            const going = runs.filter((r) => !r.stopped);
+            if (!going.length) break;
+            const left = Math.min.apply(null, going.map((r) => r.e.ms - (this.now() - r.start)));
+            await this.wait(Math.max(1, Math.min(GUARD_MS, left)));
+        }
+        for (const r of runs) if (!r.stopped) await stopIt(r);       // whatever ended it: every motor stopped
+        return { why: why, unsupported: unsupported };
+    }
+
+    /**
+     * Several axes to their counters at once, by timed pulses - the rules of moveAxis (the last position; coarse =
+     * one way, close enough, a check not read worked out from the speed; precise = from a recent position only).
+     * Resolves true, false (this.reason says why) or 'unsupported' (the module would not run two motors together).
+     */
+    async moveTogether(steps, opts) {
+        const coarse = !!(opts && opts.coarse), tol = coarse ? COARSE_TOL : TOLERANCE;
+        const axes = steps.map((s) => s[0]), target = {};
+        steps.forEach((s) => { target[s[0]] = s[1]; });
+        if (axes.some((a) => !this._actionFor(a, true))) { this.reason = 'direction not learned'; return false; }
+        if (!this.guard()) { this.reason = 'not allowed now'; return false; }
+        const first = (coarse ? this.probe.hall : this.probe.fresh && this.probe.fresh(TOWARD_FRESH_MS)) || await this._settled();
+        const p = {}, firstUp = {}, ends = {}, toEnd = {};
+        for (const a of axes) {
+            p[a] = first && first[a];
+            if (p[a] === null || p[a] === undefined) { this.reason = 'position not read'; return false; }
+            firstUp[a] = target[a] > p[a];
+            ends[a] = this.probe.travel && this.probe.travel[a];
+            toEnd[a] = !!(ends[a] && (target[a] <= ends[a][0] + 2 || target[a] >= ends[a][1] - 2));
+        }
+        this.log.info('seat: together ' + axes.map((a) => a + ' ' + p[a] + ' -> ' + target[a]).join(', ') + (coarse ? ' (coarse, one way)' : ''));
+        this.progress = { axis: axes[0], start: p[axes[0]], now: p[axes[0]], target: target[axes[0]], action: null, pulse: 0 };
+        try {
+            for (let i = 0; i < MAX_PULSES; i++) {
+                const list = [];
+                for (const a of axes) {
+                    const d = target[a] - p[a];
+                    if (Math.abs(d) <= tol) continue;
+                    if (coarse && i > 0 && (d > 0) !== firstUp[a]) continue;           // one way: past is there
+                    const up = d > 0, action = this._actionFor(a, up), v = this.probe.speed(a, action);
+                    if (!v) { this.reason = 'measure the seat speed first (Seat module)'; return false; }
+                    const share = i === 0 && !coarse ? FIRST_SHARE : 1;
+                    const ms = Math.round(Math.max(MIN_PULSE_MS, Math.min(MAX_PULSE_MS, Math.abs(d) * share / v * (toEnd[a] ? END_EXTRA : 1))));
+                    list.push({ axis: a, action: action, ms: ms, up: up, v: v, ran: 0 });
+                }
+                if (!list.length) return true;
+                const shown = list[0];
+                this.progress.axis = shown.axis; this.progress.target = target[shown.axis]; this.progress.now = p[shown.axis];
+                this.progress.action = shown.action; this.progress.pulse = i + 1;
+                this.log.info('seat: pulse ' + (i + 1) + ' ' + list.map((e) => e.axis + ' ' + e.action + ' ' + e.ms + ' ms').join(', '));
+                const r = await this.pulses(list);
+                if (r.unsupported) return 'unsupported';
+                if (r.why) { this.reason = r.why; return false; }
+                await this.wait(SETTLE_MS);
+                const h = await this._settled();
+                if (!h) {
+                    if (!coarse) { this.reason = 'position not read'; return false; }
+                    // getting out, the check not read: each pulse ran its time - there, where the speed puts it
+                    const est = Object.assign({}, this.probe.hall || {});
+                    list.forEach((e) => {
+                        let q = Math.round(p[e.axis] + (e.up ? 1 : -1) * e.v * e.ran);
+                        if (ends[e.axis]) q = Math.max(ends[e.axis][0], Math.min(ends[e.axis][1], q));
+                        est[e.axis] = q;
+                    });
+                    if (this.probe.seen) this.probe.seen(est);
+                    this.log.warn('seat: check not read: taken as there from the speed');
+                    return true;
+                }
+                if (this.probe.seen) this.probe.seen(h);
+                for (const e of list) {
+                    const q = h[e.axis], moved = q - p[e.axis];
+                    if (e.up ? moved < -WRONG_WAY : moved > WRONG_WAY) {
+                        this.probe.forgetDirection(e.axis);
+                        this.reason = 'went the wrong way: the direction is learned again'; return false;
+                    }
+                    if (Math.abs(target[e.axis] - q) > tol && Math.abs(moved) < MOVED) {
+                        // stopped short of its target: at the end of its travel (close) it is there, else it did not move
+                        if (Math.abs(target[e.axis] - q) > NEAR) { this.reason = 'the seat did not move'; return false; }
+                        target[e.axis] = q;
+                    }
+                    if (Math.abs(moved) >= MOVED && e.ran > 0) this.probe.learnSpeed(e.axis, e.action, Math.abs(moved) / e.ran);
+                }
+                for (const a of axes) if (h[a] !== null && h[a] !== undefined) p[a] = h[a];
+                this.progress.now = p[shown.axis];
+                if (await this._switchHeld()) { this.reason = 'a seat switch was touched'; return false; }
+            }
+            if (axes.every((a) => Math.abs(target[a] - p[a]) <= NEAR)) return true;
+            this.reason = 'not there after ' + MAX_PULSES + ' pulses'; return false;
+        } finally {
+            this.progress = null;
+        }
+    }
+
     /** Runs fn in the extended session, one at a time; the default session after, whatever happened. */
     async _session(fn) {
         if (this.busy) { this.reason = 'already moving'; return false; }
@@ -345,9 +483,24 @@ class SeatMover {
         }
     }
 
-    /** Several axes, one after the other: [[axis, counter], ...]. Resolves true when all arrived. */
+    /**
+     * Several axes: [[axis, counter], ...]. Both at once (as BMW's own memory does: no wait between the axes, the
+     * move as long as its longest axis) while the module takes two motors together; one after the other once it
+     * refused that (this.parallel false). Resolves true when all arrived.
+     */
     run(steps, opts) {
         return this._session(async () => {
+            if (steps.length > 1 && this.parallel !== false) {
+                const r = await this.moveTogether(steps, opts);
+                if (r !== 'unsupported') {
+                    if (r) this.parallel = true;
+                    this.log[r ? 'info' : 'warn']('seat: ' + steps.map((s) => s[0]).join(' + ') + (r ? ' at ' + steps.map((s) => s[1]).join(' / ') : ' stopped: ' + this.reason));
+                    return r;
+                }
+                this.parallel = false;
+                if (this.probe.hall) this.probe.hallAt = 0;          // the first motor ran a moment: read before going on
+                this.log.warn('seat: two motors at once not taken: one axis at a time from now');
+            }
             for (const st of steps) {
                 if (!(await this.moveAxis(st[0], st[1], opts))) {
                     this.log.warn('seat: ' + st[0] + ' stopped: ' + this.reason);

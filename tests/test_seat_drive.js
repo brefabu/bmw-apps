@@ -42,7 +42,7 @@ const be16 = (v) => [v >> 8, v & 0xFF];
  */
 function fakeModule(o) {
     const m = Object.assign({ slv: 33100, shv: 32900, speed: SPEED, wiring: 1, switchHeld: false, stops: ENDS,
-        silent: 0, silentDoes: false, refuse: null, ignore: false, sessionRefused: null }, o || {});
+        silent: 0, silentDoes: false, refuse: null, ignore: false, sessionRefused: null, oneMotor: false }, o || {});
     m.motor = { slv: 'stop', shv: 'stop' }; m.ext = false; m.sent = []; m.quiet = false;
     m.advance = (ms) => {
         ['slv', 'shv'].forEach((a) => {
@@ -76,6 +76,8 @@ function fakeModule(o) {
             const action = ['stop', 'plus', 'minus'][data[3]];
             if (action !== 'stop') {
                 if (m.refuse) return [0x7F, 0x2E, m.refuse];
+                const other = axis === 'slv' ? 'shv' : 'slv';
+                if (m.oneMotor && m.motor[other] !== 'stop') return [0x7F, 0x2E, 0x22];     // one motor at a time only
                 if (m.silent > 0) { m.silent--; if (m.silentDoes) m.motor[axis] = action; return null; }
                 if (m.ignore) return [0x6E, 0xD7, 0x08];
             }
@@ -195,10 +197,9 @@ Promise.resolve()
     assert.ok(near(mod.slv, 32801, Drv.TOLERANCE), 'fore / aft at the target: ' + mod.slv);
     assert.ok(mod.shv <= 32473 + Drv.TOLERANCE, 'fully down: ' + mod.shv);
     const w = writes(mod);
-    assert.strictEqual(w[0], 'slv minus', 'back is MINUS');
-    assert.ok(w.lastIndexOf('slv stop') < w.indexOf('shv minus'), 'one axis at a time: fore / aft first');
+    assert.deepStrictEqual(w.slice(0, 2), ['slv minus', 'shv minus'], 'both axes at once: back and down together');
     assert.ok(w.filter((x) => x === 'slv minus').length <= Drv.MAX_PULSES);
-    for (let i = 0; i < w.length; i += 2) assert.strictEqual(w[i + 1].split(' ')[1], 'stop', 'every pulse ends with STOP');
+    ['slv', 'shv'].forEach((a) => assert.strictEqual(w.filter((x) => x === a + ' stop').length, w.filter((x) => x === a + ' minus' || x === a + ' plus').length, a + ': every pulse ends with STOP'));
     onlyAllowed(mod);
 }))
 .then(() => test('getting out coarse (Easy Access): one pulse per axis, within ~1 cm, fully down by the end stop', async () => {
@@ -207,7 +208,7 @@ Promise.resolve()
     await r.probe.tick();
     const now = r.backend.status().seats.driver.pos;
     assert.strictEqual(await r.backend.goTo('driver', S.exitPosition(now, 0.75), { coarse: true }), true, r.mover.reason);
-    assert.deepStrictEqual(writes(mod), ['slv minus', 'slv stop', 'shv minus', 'shv stop'], 'one pulse each');
+    assert.deepStrictEqual(writes(mod), ['slv minus', 'shv minus', 'slv stop', 'shv stop'], 'one pulse each, together, each stopped at its time');
     assert.ok(near(mod.slv, 32801, Drv.COARSE_TOL), String(mod.slv));
     assert.strictEqual(Math.round(mod.shv), 32473, 'fully down: the pulse ran into the end stop');
     onlyAllowed(mod);
@@ -330,14 +331,50 @@ Promise.resolve()
     assert.strictEqual(r.probe.hall.slv, 33050);
     assert.ok(r.probe.fresh(1000));
 }))
+.then(() => test('together: as long as the longest axis, not both added', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900 });
+    const r = rig(mod);
+    await r.probe.tick();
+    assert.strictEqual(await r.mover.run([['slv', 32801], ['shv', 32473]], { coarse: true }), true, r.mover.reason);
+    const longest = (32900 - 32473) / SPEED * 1.15;                  // the height, to its end stop
+    assert.ok(r.clock < longest + 1500, 'took ' + r.clock + ' ms; the longest axis alone ' + Math.round(longest));
+    assert.strictEqual(r.mover.parallel, true);
+}))
+.then(() => test('a module that runs one motor at a time: one axis after the other from then on', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900, oneMotor: true });
+    const r = rig(mod);
+    await r.probe.tick();
+    assert.strictEqual(await r.mover.run([['slv', 32801], ['shv', 32473]], { coarse: true }), true, r.mover.reason);
+    assert.strictEqual(r.mover.parallel, false, 'remembered');
+    assert.ok(near(mod.slv, 32801, Drv.COARSE_TOL) && mod.shv <= 32473 + Drv.COARSE_TOL, mod.slv + ' ' + mod.shv);
+    const w = writes(mod);
+    assert.strictEqual(w[0], 'slv minus');
+    const n = w.length;
+    assert.strictEqual(await r.mover.run([['shv', 32700], ['slv', 33000]]), true, r.mover.reason);
+    const w2 = writes(mod).slice(n);
+    assert.ok(w2.lastIndexOf('shv stop') < w2.indexOf('slv plus'), 'one at a time without asking again: ' + w2.join(', '));
+    onlyAllowed(mod);
+}))
+.then(() => test('the session asked again while the link is busy (right after the engine started)', async () => {
+    const mod = fakeModule();
+    let busy = 2;
+    const physical = mod.diag.physical;
+    mod.diag.physical = async function (target, sid, data) {
+        if (sid === 0x10 && data[0] === 0x03 && busy-- > 0) throw new Error('transport refused: APP_REQUEST_TEMPORARILY_NOT_ACCEPTED');
+        return physical.apply(this, arguments);
+    };
+    const drive = new Drv.SeatDrive({ diag: mod.diag, available: true }, quiet, { sleep: () => Promise.resolve() });
+    const s = await drive.begin();
+    assert.strictEqual(s.ok, true, 'opened on the third try');
+    drive.keep(false);
+}))
 .then(() => test('getting in: up first, then forward, back to where it was', async () => {
     const mod = fakeModule({ slv: 32801, shv: 32473 });
     const r = rig(mod);
     assert.strictEqual(await r.backend.goTo('driver', { fore: (33321 - 33100) / 694, height: (32900 - 32473) / 744 }), true, r.mover.reason);
     assert.ok(near(mod.slv, 33100, Drv.TOLERANCE) && near(mod.shv, 32900, Drv.TOLERANCE), mod.slv + ' ' + mod.shv);
     const w = writes(mod);
-    assert.strictEqual(w[0], 'shv plus', 'up first');
-    assert.ok(w.lastIndexOf('shv stop') < w.indexOf('slv plus'), 'then forward');
+    assert.deepStrictEqual(w.slice(0, 2), ['shv plus', 'slv plus'], 'up and forward together');
     onlyAllowed(mod);
 }))
 .then(() => test('a speed off by a third: the correcting pulses still get there, and the kept speed learns', async () => {
@@ -399,7 +436,9 @@ Promise.resolve()
     const r = rig(mod, { during: (x) => { if (x.clock > 1000) x.mover.stop('stopped'); } });
     assert.strictEqual(await r.mover.run([['slv', 32801], ['shv', 32473]]), false);
     assert.ok(mod.slv > 32801 + 20, 'stopped on the way');
-    assert.strictEqual(writes(mod).filter((w) => w.indexOf('shv') === 0).length, 0, 'the next axis never started');
+    const w = writes(mod);
+    assert.deepStrictEqual(w.filter((x) => !/ stop$/.test(x)), ['slv minus', 'shv minus'], 'one pulse each, no more after Stop');
+    assert.ok(w.indexOf('slv stop') > 0 && w.indexOf('shv stop') > 0, 'both stopped');
     onlyAllowed(mod);
 }))
 .then(() => test('the module refuses the command: STOP, and why', async () => {

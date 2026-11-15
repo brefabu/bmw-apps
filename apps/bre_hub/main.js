@@ -131,12 +131,12 @@ mgu.run({
         // Seat Easy Access on the car's own switching: the vehicle state leaving drive-ready (10, FAHREN) is "switched
         // off" (the seat back and down), reaching it is "started" (back to the driving position). Only real data (never
         // the demo drive), and only edges seen while the app runs: the first state read moves nothing.
-        let lastState = null;
+        let lastState = null, stateAt = 0;
         setInterval(() => {
             const st = car.demoActive ? undefined : car.live && car.live.condition;
             if (st === undefined || st === null || st === lastState) return;
             const prev = lastState;
-            lastState = st;
+            lastState = st; stateAt = Date.now();
             const mode = settings.get('easyEntry'), ok = mode === 'armed' ? parkedStrict() : !parked.moving();
             const what = easyEntry.vehicleState(prev, st, mode, ok);
             if (what) log.info('seat easy access: ' + what + ' (vehicle state ' + prev + ' -> ' + st + '), parked ' + ok + ', ' + easyEntry.state);
@@ -147,6 +147,9 @@ mgu.run({
         setInterval(() => {
             if (!armed() || mover.busy || seatProbe.busy || home.ui.view === 'seatinfo') return;
             if (!(car.live && car.live.condition === 10)) return;
+            // not right after the engine was started or stopped: the link is busy then, and a read left unanswered
+            // holds it ~5 s - just when Easy Access needs it
+            if (Date.now() - stateAt < 6000) return;
             seatProbe.readPosition().catch(() => {});
         }, 3000);
         // the exhaust's Closed guard, also while the app is not on screen

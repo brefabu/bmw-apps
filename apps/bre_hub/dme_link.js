@@ -33,8 +33,9 @@ const FLAP = Object.freeze({
 const bytesToHex = (b) => (b || []).map((x) => hex(x)).join(' ');
 
 const GAP_MS = 25;              // between two requests (kit/runtime/readonly-diag.js, which Live Data uses on cars)
-const COOL_MS = 1500;           // after a request that got no answer or was turned away: the transport may still be
-                                // waiting on it, and turns everything away meanwhile (G30, 15.11.2026)
+const COOL_MS = 1500;           // after a request the transport turned away (busy)
+const NO_ANSWER_COOL_MS = 4000; // after a request that got no answer: the transport goes on waiting for it ~5 s and turns
+                                // everything away meanwhile (G30 journal, 15.11.2026: no answer at 13:17:18, busy until :23)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -55,7 +56,7 @@ function pace(diag) {
         let t0 = 0;
         const run = () => sleep(urgent ? 0 : Math.max(0, next - Date.now()))
             .then(() => { t0 = Date.now(); return raw.apply(null, args); })
-            .then((r) => { next = Date.now() + (r ? GAP_MS : COOL_MS); note(diag, args, r, null, t0); return r; },
+            .then((r) => { next = Date.now() + (r ? GAP_MS : NO_ANSWER_COOL_MS); note(diag, args, r, null, t0); return r; },
                 (e) => { next = Date.now() + COOL_MS; note(diag, args, null, e, t0); throw e; });
         const p = chain.then(run, run);
         chain = p.catch(() => {});
@@ -164,4 +165,4 @@ class DmeLink {
     }
 }
 
-module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS, COOL_MS };
+module.exports = { DmeLink, DME, FLAP, READS, pace, GAP_MS, COOL_MS, NO_ANSWER_COOL_MS };
