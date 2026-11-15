@@ -120,6 +120,49 @@ async function run() {
     assert.strictEqual(blind.hasPosition(), false);
     ok('position 1: saved, and where the seat comes back to when the car starts');
 
+    // 9. OUT kept from before (the app restarted): Try: get in / the car started still bring the seat back
+    //    (0.4.0 on the car: Try: get in did nothing after a restart - it waited for a door / ignition change)
+    await b.goTo('driver', { fore: 0.3, height: 0.6, back: 0.3 });
+    const dir9 = fs.mkdtempSync(path.join(os.tmpdir(), 'bre-seats-'));
+    let ee9 = new S.EasyEntry(b, new S.Positions(dir9, quiet), quiet);
+    assert.strictEqual(ee9.carStopped('demo', true), true);
+    await wait(3000);
+    assert.strictEqual(ee9.state, 'OUT');
+    ee9 = new S.EasyEntry(b, new S.Positions(dir9, quiet), quiet);          // a restart
+    assert.strictEqual(ee9.state, 'OUT');
+    assert.strictEqual(ee9.carStarted('demo', true), true, 'started (or Try: get in) after a restart: back in');
+    await wait(3000);
+    assert.strictEqual(ee9.state, 'IDLE');
+    ok('OUT kept over a restart is brought back by a start or Try');
+
+    // 10. not parked: nothing moves, and it says so
+    const ee10 = new S.EasyEntry(b, new S.Positions(fs.mkdtempSync(path.join(os.tmpdir(), 'bre-seats-')), quiet), quiet);
+    assert.strictEqual(ee10.carStopped('demo', false), false);
+    assert.strictEqual(ee10.events[0].key, 'ee.notParked');
+    ok('not parked: says so');
+
+    // 11. the demo and the real seat keep their positions apart: the demo's OUT never moves the real seat
+    const dir11 = fs.mkdtempSync(path.join(os.tmpdir(), 'bre-seats-'));
+    let mode = 'demo';
+    const moved = [];
+    const real = { mode: 'armed', status: () => ({ seats: { driver: { pos: { fore: 0.2, height: 0.7, back: null } } } }),
+        goTo: (s, t) => { moved.push(t); return Promise.resolve(true); }, stop() {} };
+    const both = { get mode() { return mode === 'armed' ? 'armed' : 'demo'; },
+        status() { return (mode === 'armed' ? real : b).status(); }, goTo(s, t) { return (mode === 'armed' ? real : b).goTo(s, t); },
+        stop(s) { b.stop(s); } };
+    const ee11 = new S.EasyEntry(both, new S.Positions(dir11, quiet), quiet);
+    assert.strictEqual(ee11.carStopped('demo', true), true);
+    await wait(3000);
+    assert.strictEqual(ee11.state, 'OUT');
+    assert.strictEqual(ee11.hasPosition(), false);
+    mode = 'armed';                                                          // armed afterwards
+    assert.strictEqual(ee11.carStarted('armed', true), false, 'the demo let it out: the real seat stays');
+    assert.strictEqual(ee11.events[0].key, 'ee.otherMode');
+    assert.deepStrictEqual(moved, [], 'the real seat was never moved');
+    const kept = new S.Positions(dir11, quiet);
+    assert.ok(kept.get('driver', 'drive') && !kept.get('driver.real', 'drive'), 'the demo\'s driving position is the demo\'s only');
+    ok('the demo\'s positions and OUT never move the real seat');
+
     b.close();
     console.log(passed + ' passed');
 }

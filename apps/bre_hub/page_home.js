@@ -44,12 +44,15 @@ function stepOffset(app, d) {
     const n = OFFSETS[Math.max(0, Math.min(OFFSETS.length - 1, (i < 0 ? OFFSETS.indexOf(75) : i) + d))];
     app.settings.set('seatOffset', String(n));
 }
+// what a press can answer, shown under the seat list for a few seconds (the value: shown as a warning)
+const FOOT_NOTES = { 'ee.saved': false, 'ee.noPosition': true, 'ee.notParked': true, 'ee.otherMode': true, 'ee.noReturn': true };
+
 /** The line under the seat list: the state, demo or armed, and why the real seat stopped. */
 function seatFoot(app, ee, mode) {
     // a save just made says so for a few seconds
     const last = ee.events && ee.events[0];
-    if (last && Date.now() - last.t < 5000 && (last.key === 'ee.saved' || last.key === 'ee.noPosition')) {
-        return { text: noPositionText(app, last.key), warn: last.key === 'ee.noPosition' };
+    if (last && Date.now() - last.t < 5000 && FOOT_NOTES[last.key] !== undefined) {
+        return { text: noPositionText(app, last.key), warn: FOOT_NOTES[last.key] };
     }
     if (mode !== 'armed') return { text: T('state.' + ee.state) + ' · ' + T('seats.demo') };
     // the real seat moving: what it does right now - the position being read, or an axis and its counter live
@@ -89,14 +92,13 @@ function rows(app, parked) {
     if (ui.view === 'seat') {
         const moving = ee.state === 'MOVING_OUT' || ee.state === 'MOVING_IN';
         const tryKey = moving ? 'seats.stop' : ee.state === 'OUT' ? 'seats.tryIn' : ee.state === 'STOPPED' ? 'seats.reset' : 'seats.tryOut';
+        // Try: the same as the car's own switching off / starting (no door or ignition edge needed), so a press
+        // always does something or says why not
         const tryRun = () => {
             if (moving) { ee.manual(); app.seats.stop('driver'); }
             else if (ee.state === 'STOPPED') ee.reset();
-            else if (ee.state === 'OUT') ee.onCar({ doorOpen: false, ignition: true, parked: parked }, mode);
-            else {
-                ee.onCar({ doorOpen: false, ignition: true, parked: parked }, mode);       // (a fresh door opening)
-                ee.onCar({ doorOpen: true, ignition: false, parked: parked }, mode);
-            }
+            else if (ee.state === 'OUT') ee.carStarted(mode, parked);
+            else ee.carStopped(mode, parked);
         };
         return {
             list: [

@@ -28,6 +28,7 @@ const JOG_HOLD_MS = 350;        // a jog stops when it is not repeated within th
 const TICK_MS = 50;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const DEMO = 'driver', REAL = 'driver.real';     // where the demo's and the real seat's positions are kept
 const REFRESH_MS = 12000;       // a backend's fresh position read: given up after this (the position then counts as unknown)
 
 /** p (a promise or a value), settled within ms whatever it does; never rejects. */
@@ -164,29 +165,42 @@ function exitPosition(pos, offset) {
  * carStopped() / carStarted() (main.js, from the vehicle state); onCar() is the page's demo (door and ignition).
  * OUT is kept with the positions, so a restart of the app between switching off and starting still brings the
  * seat back.
+ * The demo and the real seat keep their positions and their OUT apart ('driver' / 'driver.real', by the backend's
+ * mode): nothing the demo saved ever moves the real seat.
  */
 class EasyEntry {
     constructor(backend, positions, log) {
         this.backend = backend; this.positions = positions; this.log = log;
         this.offset = 0.75;                        // how far back the seat goes (setOffset)
-        this.state = positions && positions.flag && positions.flag('driver', 'out') && positions.get('driver', 'drive') ? 'OUT' : 'IDLE';
+        // OUT kept from before (a restart between switching off and starting): which seat it belongs to
+        const kept = (k) => positions && positions.flag && positions.flag(k, 'out') && positions.get(k, 'drive');
+        this.outKey = kept(REAL) ? REAL : kept(DEMO) ? DEMO : null;
+        this.state = this.outKey ? 'OUT' : 'IDLE';
         this.events = [];                          // the last few events, shown on the page; never written to disk
         this.car = { doorOpen: false, ignition: true, parked: true };
     }
+    /** Where this seat's positions are kept: the real seat's apart from the demo's. */
+    _key() { return this.backend && this.backend.mode === 'armed' ? REAL : DEMO; }
     _set(state) {
         this.state = state;
-        if (this.positions && this.positions.setFlag) this.positions.setFlag('driver', 'out', state === 'OUT');
+        if (!this.positions || !this.positions.setFlag) return;
+        if (state === 'OUT') { this.outKey = this._key(); this.positions.setFlag(this.outKey, 'out', true); }
+        else { this.outKey = null; this.positions.setFlag(REAL, 'out', false); this.positions.setFlag(DEMO, 'out', false); }
     }
-    /** The car was switched off (the vehicle state left drive-ready): the seat out of the way, if parked. */
+    /** The car was switched off (the vehicle state left drive-ready), or Try: get out: the seat out of the way. */
     carStopped(mode, parked) {
-        if (!this.enabled(mode) || this.state !== 'IDLE' || !parked) return false;
+        if (!this.enabled(mode) || this.state !== 'IDLE') return false;
+        if (!parked) { this.note('ee.notParked'); return false; }
         this.goOut();
         return true;
     }
-    /** The car was started (drive-ready): back to the driving position if the seat was let out, if parked. */
+    /** The car was started (drive-ready), or Try: get in: back to the driving position if the seat was let out. */
     carStarted(mode, parked) {
         if (this.state === 'STOPPED') { this._set('IDLE'); this.note('ee.ready'); return false; }
-        if (!this.enabled(mode) || this.state !== 'OUT' || !parked) return false;
+        if (!this.enabled(mode) || this.state !== 'OUT') return false;
+        // let out by the demo: the real seat was never moved, so it is not brought back from anywhere
+        if (this.outKey && this.outKey !== this._key()) { this.note('ee.otherMode'); return false; }
+        if (!parked) { this.note('ee.notParked'); return false; }
         this.goIn();
         return true;
     }
@@ -232,7 +246,7 @@ class EasyEntry {
                 this._set('IDLE'); this.note('ee.noPosition');
                 return null;
             }
-            this.positions.set('driver', 'drive', now);
+            this.positions.set(this._key(), 'drive', now);
             return this.backend.goTo('driver', exitPosition(now, this.offset)).then((ok) => {
                 if (this.state !== 'MOVING_OUT') return;
                 this._set(ok ? 'OUT' : 'STOPPED'); this.note(ok ? 'ee.atExit' : 'ee.notFinished');
@@ -250,17 +264,18 @@ class EasyEntry {
                 this.note('ee.noPosition');
                 return false;
             }
-            this.positions.set('driver', 'mem1', now);
+            this.positions.set(this._key(), 'mem1', now);
             this.note('ee.saved');
             return true;
         });
     }
     /** Position 1 saved. */
-    hasPosition() { return !!this.positions.get('driver', 'mem1'); }
+    hasPosition() { return !!this.positions.get(this._key(), 'mem1'); }
     goIn() {
         // position 1 when saved, else where the seat was when the car was switched off
-        const drive = this.positions.get('driver', 'mem1') || this.positions.get('driver', 'drive');
-        if (!drive) { this._set('IDLE'); return Promise.resolve(); }
+        const key = this._key();
+        const drive = this.positions.get(key, 'mem1') || this.positions.get(key, 'drive');
+        if (!drive) { this._set('IDLE'); this.note('ee.noReturn'); return Promise.resolve(); }
         this.state = 'MOVING_IN'; this.note('ee.movingIn');
         return Promise.resolve(this.backend.goTo('driver', drive)).then((ok) => {
             if (this.state !== 'MOVING_IN') return;

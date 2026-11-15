@@ -325,13 +325,15 @@ Promise.resolve()
     await new Promise((res) => { const t = setInterval(() => { if (ee.state !== 'MOVING_OUT') { clearInterval(t); res(); } }, 5); });
     assert.strictEqual(ee.state, 'OUT', r.mover.reason);
     assert.ok(near(mod.slv, 32801, Drv.TOLERANCE) && mod.shv <= 32473 + Drv.TOLERANCE, mod.slv + ' ' + mod.shv);
+    assert.strictEqual(new S.Positions(dir, quiet).flag('driver.real', 'out'), true, 'the OUT of the real seat, kept apart from the demo');
+    assert.ok(new S.Positions(dir, quiet).get('driver.real', 'drive') && !new S.Positions(dir, quiet).get('driver', 'drive'));
     ee = new S.EasyEntry(r.backend, new S.Positions(dir, quiet), quiet);
     assert.strictEqual(ee.state, 'OUT', 'still OUT after a restart');
     assert.strictEqual(ee.carStarted('armed', true), true);
     await new Promise((res) => { const t = setInterval(() => { if (ee.state !== 'MOVING_IN') { clearInterval(t); res(); } }, 5); });
     assert.strictEqual(ee.state, 'IDLE', r.mover.reason);
     assert.ok(near(mod.slv, 33100, Drv.TOLERANCE) && near(mod.shv, 32900, Drv.TOLERANCE), mod.slv + ' ' + mod.shv);
-    assert.strictEqual(new S.Positions(dir, quiet).flag('driver', 'out'), false);
+    assert.strictEqual(new S.Positions(dir, quiet).flag('driver.real', 'out'), false, 'back in: not OUT after a restart');
     onlyAllowed(mod);
 }))
 .then(() => test('the file writes only D708, for fore / aft and height', () => {
