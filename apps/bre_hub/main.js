@@ -25,6 +25,8 @@ const home = require('./page_home');
 
 const FES = 'de.bmw.infotainment.drivingexcitement.FES';
 const RPM_STALE_MS = 5000;              // the exhaust's Closed guard: an engine speed older than this is none
+// why Take from M1 took nothing (seat_link.js watchM1), as Easy Access's notes (bre_text ee.*)
+const M1_WHY = { m2: 'ee.m1Other', switch: 'ee.m1Switch', timeout: 'ee.m1NotSeen', stopped: 'ee.m1Stopped', unread: 'ee.m1Unread' };
 const EXHAUST_KEYS = ['exhaustArm', 'exhaustHold', 'exhaustCloseLimit', 'exhaustDrive', 'exhaustSport', 'exhaustComfort', 'exhaustEco'];
 
 mgu.run({
@@ -109,6 +111,28 @@ mgu.run({
                 },
                 state() { return { testing: mover.testing, tested: mover.tested }; },
             },
+            /**
+             * Take from M1 (seat_link.js watchM1): position 1 from the seat's own memory, read only - the driver
+             * holds M1 on the door until the seat stops, and that position is saved. Armed only (the real seat's
+             * positions). run() starts it; saveNow() gives up on M1 and saves the seat as it is; state() for the page.
+             */
+            seatM1: {
+                run() {
+                    if (!armed() || mover.busy || seatProbe.watching) return;
+                    const moving = () => mover.busy || easyEntry.state === 'MOVING_OUT' || easyEntry.state === 'MOVING_IN';
+                    seatProbe.watchM1({ stopIf: moving, onChange: repaint }).then((r) => {
+                        if (r.ok) return easyEntry.savePosition('m1');
+                        if (r.why !== 'cancelled') easyEntry.note(M1_WHY[r.why] || 'ee.m1NotSeen');
+                        return null;
+                    }).then(repaint, (e) => log.error('seat M1', e));
+                    repaint();
+                },
+                saveNow() {
+                    seatProbe.cancelWatch();
+                    easyEntry.savePosition().then(repaint, (e) => log.error('seat save', e));
+                },
+                state() { return seatProbe.watching; },
+            },
             /** The last requests to the car, newest first (dme_link.js pace: docs/07, rule 7). */
             journal() { return (link.diag && link.diag.journal) || []; },
             /** The page target the controller is on (its key), or null. */
@@ -187,7 +211,7 @@ mgu.run({
             if (k === 'language') text.setLanguage(settings.get('language'));
             if (k === 'seatOffset') easyEntry.setOffset(settings.get('seatOffset'));
             // any change of the mode (off / demo / armed) stops whatever seat move runs
-            if (k === 'easyEntry') { easyEntry.manual(); seats.stop('driver'); easyEntry.sync(); }
+            if (k === 'easyEntry') { easyEntry.manual(); seats.stop('driver'); seatProbe.cancelWatch(); easyEntry.sync(); }
             if (EXHAUST_KEYS.indexOf(k) >= 0) {
                 Promise.resolve(k === 'exhaustArm' ? exhaust.refresh() : null)
                     .then(() => exhaust.settingsChanged(k))

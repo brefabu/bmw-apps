@@ -46,7 +46,29 @@ function stepOffset(app, d) {
 }
 // what a press can answer, shown under the seat list for a few seconds (the value: shown as a warning)
 const FOOT_NOTES = { 'ee.saved': false, 'ee.noPosition': true, 'ee.notParked': true, 'ee.otherMode': true, 'ee.noReturn': true,
-    'ee.notNow': true };
+    'ee.notNow': true, 'ee.savedM1': false, 'ee.m1Other': true, 'ee.m1Switch': true, 'ee.m1NotSeen': true, 'ee.m1Stopped': true,
+    'ee.m1Unread': true };
+
+/** Take from M1 running (app.seatM1.state(): { seen, moved, buttons }): what the driver does now, and what is seen. */
+function m1Foot(w) {
+    if (w.seen) return { text: T('seats.m1Seen') };
+    if (w.moved) return { text: T('seats.m1Moving') };
+    return { text: T(w.buttons === false ? 'seats.m1NoButtons' : 'seats.m1Hold') };
+}
+
+/**
+ * Position 1's row. Armed: taken from the seat's own memory M1 (a press starts watching for it; pressed again
+ * meanwhile, the seat is saved as it is instead). The demo: saved as it is.
+ */
+function positionRow(app, ee, on, moving) {
+    const m1 = app.settings.get('easyEntry') === 'armed' && app.seatM1, w = m1 ? m1.state() : null;
+    const from = ee.positionFrom ? ee.positionFrom() : null;
+    const value = from === 'm1' ? T('seats.fromM1') : from ? T('seats.saved') : '-';
+    if (!m1) return { key: 'seat-save', label: T('seats.save1'), value: value, dim: !on || moving,
+        run: () => { if (ee.savePosition) ee.savePosition().catch(() => {}); } };
+    if (w) return { key: 'seat-save', label: T('seats.saveNow'), value: '...', color: 'warn', run: () => m1.saveNow() };
+    return { key: 'seat-save', label: T('seats.takeM1'), value: value, dim: moving, run: () => m1.run() };
+}
 
 /** The line under the seat list: the state, demo or armed, and why the real seat stopped. */
 function seatFoot(app, ee, mode) {
@@ -92,6 +114,7 @@ function rows(app, parked) {
     const on = mode !== 'off';
     if (ui.view === 'seat') {
         const moving = ee.state === 'MOVING_OUT' || ee.state === 'MOVING_IN';
+        const watching = mode === 'armed' && app.seatM1 ? app.seatM1.state() : null;
         const tryKey = moving ? 'seats.stop' : ee.state === 'OUT' ? 'seats.tryIn' : ee.state === 'STOPPED' ? 'seats.reset' : 'seats.tryOut';
         // Try: the same as the car's own switching off / starting (no door or ignition edge needed), so a press
         // always does something or says why not
@@ -109,13 +132,12 @@ function rows(app, parked) {
                     less: () => stepOffset(app, -1), more: () => stepOffset(app, 1) },
                 { key: 'seat-try', label: T(tryKey), color: moving ? 'crit' : null, dim: !on || (!parked && !moving), run: tryRun },
                 // position 1: where the seat comes back to when the car starts
-                { key: 'seat-save', label: T('seats.save1'), value: ee.hasPosition && ee.hasPosition() ? T('seats.saved') : '-',
-                    dim: !on || moving, run: () => { if (ee.savePosition) ee.savePosition().catch(() => {}); } },
+                positionRow(app, ee, on, moving),
                 { key: 'seat-module', label: T('seats.module'), value: probeState(app.seatProbe), next: true,
                     run: () => { show(app, 'seatinfo', 'probe-back'); if (app.seatProbe) app.seatProbe.tick().catch(() => {}); } },
                 { key: 'seat-log', label: T('seats.log'), next: true, run: () => show(app, 'seatlog', 'log-back') },
             ],
-            foot: !parked ? { text: T('seats.parkedOnly'), warn: true } : !on ? null : seatFoot(app, ee, mode),
+            foot: watching ? m1Foot(watching) : !parked ? { text: T('seats.parkedOnly'), warn: true } : !on ? null : seatFoot(app, ee, mode),
         };
     }
     if (ui.view === 'seatlog') {

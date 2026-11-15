@@ -102,6 +102,12 @@ async function run() {
     assert.strictEqual(await ee.savePosition(), true);
     assert.strictEqual(ee.hasPosition(), true);
     assert.strictEqual(ee.events[0].key, 'ee.saved');
+    assert.strictEqual(ee.positionFrom(), 'now');
+    // taken from the seat's memory M1 (main.js, after SeatProbe.watchM1): the same place, said so
+    assert.strictEqual(await ee.savePosition('m1'), true);
+    assert.strictEqual(ee.events[0].key, 'ee.savedM1');
+    assert.strictEqual(ee.positionFrom(), 'm1');
+    assert.strictEqual(new S.Positions(dir, quiet).get('driver', 'mem1').from, 'm1', 'kept across a restart');
     await b.goTo('driver', { fore: 0.4, height: 0.4, back: 0.3 });   // someone else drove it like this
     assert.strictEqual(ee.carStopped('demo', true), true);
     await wait(2700);

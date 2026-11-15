@@ -11,6 +11,8 @@
  *   22 D704  INITIALISIERUNG_SITZ byte 0: 0 not initialised, 1 initialised, 255 not right; per axis normalised + / -
  *   22 D708  MOTOR                per axis: 0 off, 1 plus (fore / up), 2 minus (back / down), 3 not fitted
  *   22 D712  SCHALTER_SV          the seat's own switches, per axis + / -: 0 not pressed, 1 pressed, 2 not fitted
+ *   22 D70C  SCHALTER_MEMORY      the memory buttons M1, M2, MEM (store), reset: 0 not pressed, 1 pressed,
+ *                                 2 not fitted / not coded (read only: the job's 2E side only lights the MEM LED)
  * Layouts from the SGBD FAS_G11 (Sitzmodul Fahrer, the G11 platform), public reference
  * https://emdzej.github.io/ediabasx-docs-sgbd/sgbd/FAS_G11/ (SG_FUNKTIONEN). The G30 is on that platform; the
  * probe is how we find out that its module answers the same.
@@ -25,8 +27,8 @@ const { hex, NRC, replyTo } = require('./kit/diag');
 const { exitPosition } = require('./seats_backend');
 
 const FAS = 0x6D;
-const DID = Object.freeze({ CONFIG_HW: 0xD700, HALL: 0xD702, INIT: 0xD704, MOTOR: 0xD708, SWITCHES: 0xD712 });
-const READS = Object.freeze([DID.CONFIG_HW, DID.HALL, DID.INIT, DID.MOTOR, DID.SWITCHES]);
+const DID = Object.freeze({ CONFIG_HW: 0xD700, HALL: 0xD702, INIT: 0xD704, MOTOR: 0xD708, SWITCHES: 0xD712, MEMORY: 0xD70C });
+const READS = Object.freeze([DID.CONFIG_HW, DID.HALL, DID.INIT, DID.MOTOR, DID.SWITCHES, DID.MEMORY]);
 
 // the axes we show: their index in D700 / D702 (x2) / D708, and their switches' bytes in D712 (+, -).
 // plus / minus: where the motor's PLUS and MINUS take the seat (TAB_STATUS_MOTOR: "Plus, vor, auf"; "Minus,
@@ -49,9 +51,15 @@ const HALL_PAUSE_MS = 300;       // tried again while the transport says busy: m
 const MIN_STEP = 3;              // counts a poll must move for a direction sample
 const VOTES = 2;                 // agreeing samples (and twice the disagreeing ones) to learn a direction
 const HALL_MIN = 8192, HALL_MAX = 57344;
-const LEN = { 0xD702: 22, 0xD712: 19 };      // reply data lengths (SGBD RES tables), until a single read shows them
+const LEN = { 0xD702: 22, 0xD712: 19, 0xD70C: 7 };   // reply data lengths (SGBD RES tables), until a single read shows them
 const SPEED_MIN = 0.002, SPEED_MAX = 1;      // counts per ms a seat speed may have (2 .. 1000 counts per second)
 const TRAVEL_FILE = 'bre_seat_travel.json';
+// Take from M1 (SeatProbe.watchM1): the seat's own memory moves it, we watch where it comes to rest
+const WATCH_MS = 30000;          // how long the watch waits for M1 and the seat
+const STILL_MS = 2000;           // the position unchanged this long after M1 was seen (or the seat moved by itself): there
+const STILL_COUNTS = 3;          // a counter change this small between two reads is no move
+const SELF_COUNTS = 8;           // this much, no seat switch held: the seat moving by itself (its memory)
+const WATCH_PAUSE_MS = 100;      // between two rounds of reads (a round is two requests, ~0.2 s each on the G30)
 
 const u16 = (d, at) => (d.length >= at + 2 ? (d[at] << 8) | d[at + 1] : null);
 
@@ -93,6 +101,15 @@ function parseSwitches(d) {
         if (p === 1 || m === 1) pressed = true;
     });
     return { pressed: pressed, axes: axes };
+}
+
+/**
+ * D70C -> { m1, m2, mem, reset: true pressed | false not | null unknown, fitted: the module sees M1 }.
+ * TAB_STATUS_TASTE: 0 not pressed, 1 pressed, 2 not fitted / not coded, 0xFF not valid.
+ */
+function parseMemory(d) {
+    const b = (v) => (v === 1 ? true : v === 0 ? false : null);
+    return { m1: b(d[0]), m2: b(d[1]), mem: b(d[2]), reset: b(d[3]), fitted: d[0] === 0 || d[0] === 1 };
 }
 
 class SeatLink {
@@ -149,6 +166,12 @@ class SeatLink {
         return { ok: true, hall: parseHall(h.data), switches: s.ok ? parseSwitches(s.data) : null };
     }
 
+    /** The memory buttons (22 D70C): { ok, memory } (parseMemory) or { ok: false, nrc, reason }. Never throws. */
+    async readMemory(timeoutMs) {
+        const r = await this.read(DID.MEMORY, timeoutMs, true);
+        return r.ok ? { ok: true, memory: parseMemory(r.data) } : r;
+    }
+
     /** 62 <DID> <data> <DID> <data> ... by each identifier's length (seen in a single read, else the SGBD's). */
     _split(reply, dids) {
         if (!reply || reply[0] !== 0x62) return null;
@@ -197,14 +220,17 @@ class SeatLink {
  * motors and the switches); main.js calls it about once a second while the probe's list is open.
  */
 class SeatProbe {
-    /** o (optional): { sleep(ms) } for the tests. */
+    /** o (optional): { sleep(ms), now() } for the tests. */
     constructor(seatLink, log, dataDir, o) {
         this.seat = seatLink; this.log = log;
         this.file = dataDir ? path.join(dataDir, TRAVEL_FILE) : null;
         this.wait = (o && o.sleep) || ((ms) => new Promise((r) => setTimeout(r, ms)));
+        this.now = (o && o.now) || Date.now;
         this.state = 'idle';            // idle | reading | found | none | nolink
         this.reason = null;             // why 'none': the module's refusal or 'timeout'
         this.config = null; this.init = null; this.hall = null; this.motor = null; this.switches = null;
+        this.memory = null;             // the memory buttons, as last read (watchM1)
+        this.watching = null;           // Take from M1 running: { at, seen, buttons } (watchM1), else null
         this.hallAt = 0;                // when the position was last read
         this.hallError = null;          // why the last position read failed (shown on the page), or null
         const saved = this._load();
@@ -228,9 +254,8 @@ class SeatProbe {
     readPosition() {
         if (this._tick) return this._tick.then(() => this.hallAt > Date.now() - 1000);
         if (!this.seat.available || this.state !== 'found') return this.tick().then(() => this.hallAt > Date.now() - 1000);
-        const done = () => { this._tick = null; };
         const p = this._readHall();
-        this._tick = p.then(done, done);
+        const t = this._tick = p.then(() => this._untick(t), () => this._untick(t));
         return p;
     }
 
@@ -386,9 +411,91 @@ class SeatProbe {
      */
     tick() {
         if (this._tick) return this._tick;
-        const done = () => { this._tick = null; };
-        this._tick = this._poll().then(done, (e) => { done(); this.log.warn('seat probe: ' + e); });
-        return this._tick;
+        const t = this._tick = this._poll().then(() => this._untick(t), (e) => { this._untick(t); this.log.warn('seat probe: ' + e); });
+        return t;
+    }
+
+    /** The running read t is over (a watch that came after it keeps its own). */
+    _untick(t) { if (this._tick === t) this._tick = null; }
+
+    /**
+     * Take from M1: position 1 from the seat's own memory (docs/07). The driver presses M1 on the door and holds it
+     * until the seat stops; meanwhile this watches, read only - the memory buttons (22 D70C), the position and the
+     * seat's switches (22 D702 D712). The factory memory moves the seat; where it comes to rest is M1.
+     * Taken once M1 was seen pressed and the position then stays put STILL_MS. A module that does not show its
+     * memory buttons: once the seat moved by itself (no seat switch held) and came to rest. Not taken: M2 pressed,
+     * a seat switch held after M1, nothing within WATCH_MS, or o.stopIf() (a seat move started: the watch gives way).
+     * Polls and reads asked meanwhile wait for it (busy). o: { stopIf(), onChange() }.
+     * Resolves { ok, hall: { slv, shv }, how: 'button' | 'moved' } or { ok: false, why: 'm2' | 'switch' | 'timeout' |
+     * 'stopped' | 'cancelled' | 'unread' }. Never throws.
+     */
+    watchM1(o) {
+        if (this._watch) return this._watch.done;
+        const w = this._watch = { cancel: false, seen: false, moved: false, buttons: null, at: this.now() };
+        this.watching = w;
+        const go = () => this._watchM1(w, o || {});
+        const done = (this._tick || Promise.resolve()).then(go, go)
+            .catch((e) => { this.log.warn('seat probe: M1 watch ' + e); return { ok: false, why: 'unread' }; })
+            .then((r) => {
+                if (this._watch === w) { this._watch = null; this.watching = null; }
+                this.log.info('seat probe: M1 watch ' + (r.ok ? 'took ' + JSON.stringify(r.hall) + ' (' + r.how + ')' : 'ended: ' + r.why));
+                return r;
+            });
+        const t = this._tick = done.then(() => this._untick(t));
+        w.done = done;
+        return done;
+    }
+
+    /** Stop a running Take from M1 (it resolves { ok: false, why: 'cancelled' }). */
+    cancelWatch() { if (this._watch) this._watch.cancel = true; }
+
+    async _watchM1(w, o) {
+        const changed = () => { if (o.onChange) { try { o.onChange(); } catch (e) { /* the page only */ } } };
+        let last = null, stillAt = 0, askButtons = true, read = false, heldBefore = false;
+        while (this.now() - w.at < WATCH_MS) {
+            if (w.cancel) return { ok: false, why: 'cancelled' };
+            if (o.stopIf && o.stopIf()) return { ok: false, why: 'stopped' };
+            if (!this.seat.available) return { ok: false, why: 'unread' };
+            if (askButtons) {
+                const m = await this.seat.readMemory();
+                if (m.ok) {
+                    this.memory = m.memory;
+                    if (w.buttons !== m.memory.fitted) { w.buttons = m.memory.fitted; changed(); }
+                    if (!m.memory.fitted) askButtons = false;            // the module does not see them: its moving tells
+                    else if (m.memory.m2) return { ok: false, why: 'm2' };
+                    else if (m.memory.m1 && !w.seen) { w.seen = true; stillAt = this.now(); changed(); }
+                } else if (m.nrc !== null && m.nrc !== undefined) { askButtons = false; w.buttons = false; changed(); }
+            }
+            const b = await this.seat.readBoth(1000, true);
+            if (b.ok && b.hall && b.hall.slv !== null && b.hall.shv !== null) {
+                read = true;
+                this.seen(b.hall); this.switches = b.switches; this._extend(b.hall); this._save();
+                const held = !!(b.switches && b.switches.pressed), manual = held || heldBefore;
+                heldBefore = held;
+                // a seat switch after M1: the person took over, the seat is not where M1 put it
+                if (held && (w.seen || w.moved)) return { ok: false, why: 'switch' };
+                const step = last ? Math.max(Math.abs(b.hall.slv - last.slv), Math.abs(b.hall.shv - last.shv)) : 0;
+                if (!last || step > STILL_COUNTS) stillAt = Math.max(stillAt, this.now());
+                // moving by itself counts only where the buttons cannot be read (else M1 must be seen: M2 moves it too)
+                if (step >= SELF_COUNTS && !manual && w.buttons === false && !w.moved) { w.moved = true; changed(); }
+                last = b.hall;
+                if ((w.seen || w.moved) && this.now() - stillAt >= STILL_MS) {
+                    return { ok: true, hall: { slv: last.slv, shv: last.shv }, how: w.seen ? 'button' : 'moved' };
+                }
+            }
+            await this.wait(WATCH_PAUSE_MS);
+        }
+        return { ok: false, why: read ? 'timeout' : 'unread' };
+    }
+
+    /** The ends seen: a position read widens the travel. */
+    _extend(hall) {
+        Object.keys(AXES).forEach((a) => {
+            const v = hall[a];
+            if (v === null || v === undefined) return;
+            const r = this.travel[a];
+            if (!r) { this.travel[a] = [v, v]; this._dirty = true; } else if (v < r[0]) { r[0] = v; this._dirty = true; } else if (v > r[1]) { r[1] = v; this._dirty = true; }
+        });
     }
 
     /** The position, tried HALL_TRIES times; a failure keeps the last one (moves start from it). Resolves true when read. */
@@ -443,12 +550,7 @@ class SeatProbe {
         this.motor = m.ok ? parseMotor(m.data) : null;
         // the ends and the directions only from a position read in this poll
         if (fresh) {
-            Object.keys(AXES).forEach((a) => {
-                const v = this.hall[a];
-                if (v === null) return;
-                const r = this.travel[a];
-                if (!r) { this.travel[a] = [v, v]; this._dirty = true; } else if (v < r[0]) { r[0] = v; this._dirty = true; } else if (v > r[1]) { r[1] = v; this._dirty = true; }
-            });
+            this._extend(this.hall);
             this._learn();
         }
         this._save();
@@ -460,4 +562,5 @@ class SeatProbe {
     _note(line) { if (line !== this._last) { this._last = line; this.log.info(line); } }
 }
 
-module.exports = { SeatLink, SeatProbe, FAS, DID, READS, AXES, MIN_TRAVEL, parseConfig, parseHall, parseInit, parseMotor, parseSwitches };
+module.exports = { SeatLink, SeatProbe, FAS, DID, READS, AXES, MIN_TRAVEL, WATCH_MS, STILL_MS,
+    parseConfig, parseHall, parseInit, parseMotor, parseSwitches, parseMemory };

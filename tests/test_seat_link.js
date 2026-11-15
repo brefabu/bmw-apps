@@ -61,6 +61,32 @@ const SW_SLV_FWD = [1, 0, 0, 0, 2, 2].concat(new Array(13).fill(2));
  * A seat that moves under the probe: each step is one poll, { slv, shv } counters and the motor directions the
  * module reports during it. Returns the probe after the run.
  */
+/**
+ * Take from M1 (SeatProbe.watchM1) under a fake clock: each request takes 200 ms, and scene(t) says what the seat
+ * is at t ms: { slv, shv, m1, m2, sw (a seat switch held), buttons: 'fitted' (default) | 'none' (2: not fitted) |
+ * 'nrc' (D70C refused) }. o(probe): the watch's options. Resolves { r, diag, probe, t }.
+ */
+async function watchScene(scene, o) {
+    let t = 0;
+    const at = () => scene(t);
+    const table = {
+        0xD70C: () => {
+            t += 200;
+            const s = at();
+            return s.buttons === 'nrc' ? 'nrc' : s.buttons === 'none' ? [2, 2, 2, 2, 0, 0, 0] : [s.m1 ? 1 : 0, s.m2 ? 1 : 0, 0, 0, 0, 0, 0];
+        },
+        0xD702: () => { t += 200; const s = at(); return hall(s.slv, s.shv); },
+        0xD712: () => { t += 200; return at().sw ? SW_SLV_BACK : SW_NONE; },
+    };
+    const diag = fakeDiag(table);
+    const probe = new L.SeatProbe(new L.SeatLink(linkOf(diag), quiet), quiet, null, { sleep: async (ms) => { t += ms; }, now: () => t });
+    const r = await probe.watchM1(o ? o(probe) : undefined);
+    return { r: r, diag: diag, probe: probe, t: t };
+}
+const lerp = (t, t0, t1, a, b) => (t <= t0 ? a : t >= t1 ? b : Math.round(a + (b - a) * (t - t0) / (t1 - t0)));
+const onlyReads = (diag) => diag.sent.every((q) => q.target === 0x6D && q.sid === 0x22 &&
+    q.data.length % 2 === 0 && q.data.every((x, i) => i % 2 || L.READS.indexOf((x << 8) | q.data[i + 1]) >= 0));
+
 async function drive(probe, table, steps) {
     for (const s of steps) {
         table[0xD702] = hall(s.slv, s.shv);
@@ -90,7 +116,7 @@ Promise.resolve()
     await seat.read(0xD700);
     assert.deepStrictEqual(diag.sent, [{ target: 0x6D, sid: 0x22, data: [0xD7, 0x00], quietWhileSent: true }]);
     assert.strictEqual(diag.quiet, false, 'the transport\'s own logging is put back');
-    assert.deepStrictEqual(L.READS.slice().sort(), [0xD700, 0xD702, 0xD704, 0xD708, 0xD712]);
+    assert.deepStrictEqual(L.READS.slice().sort(), [0xD700, 0xD702, 0xD704, 0xD708, 0xD70C, 0xD712]);
 }))
 .then(() => test('no link: nothing is sent', async () => {
     const diag = fakeDiag({ 0xD700: CONFIG });
@@ -333,6 +359,60 @@ Promise.resolve()
     r = await x.seat.readBoth();
     assert.strictEqual(r.ok, false);
     assert.strictEqual(x.seat.multi, null);
+}))
+.then(() => test('the memory buttons (D70C) as the SGBD lays them out', () => {
+    assert.deepStrictEqual(L.parseMemory([1, 0, 0, 0, 0, 0, 0]), { m1: true, m2: false, mem: false, reset: false, fitted: true });
+    assert.deepStrictEqual(L.parseMemory([0, 1, 0, 0, 0, 0, 0]), { m1: false, m2: true, mem: false, reset: false, fitted: true });
+    assert.deepStrictEqual(L.parseMemory([2, 2, 2, 2, 0, 0, 0]), { m1: null, m2: null, mem: null, reset: null, fitted: false });
+    assert.strictEqual(L.parseMemory([0xFF]).fitted, false);
+}))
+.then(() => test('Take from M1: M1 held, the seat moves by its memory and stops: that position is taken', async () => {
+    const x = await watchScene((t) => ({ slv: lerp(t, 1200, 3000, 33000, 33200), shv: lerp(t, 1200, 3000, 32800, 32650),
+        m1: t >= 1000 && t < 3000 }));
+    assert.deepStrictEqual(x.r, { ok: true, hall: { slv: 33200, shv: 32650 }, how: 'button' });
+    assert.ok(x.t >= 3000 + L.STILL_MS, 'taken only once the seat stayed put ' + L.STILL_MS + ' ms (' + x.t + ')');
+    assert.ok(onlyReads(x.diag), 'only reads of READS, only to the seat module');
+    assert.deepStrictEqual(x.probe.hall.slv, 33200, 'the position is kept as the latest read');
+    assert.strictEqual(x.probe.busy, false);
+    assert.strictEqual(x.probe.watching, null);
+}))
+.then(() => test('Take from M1: the seat at M1 already (M1 held, nothing moves): taken where it is', async () => {
+    const x = await watchScene((t) => ({ slv: 33100, shv: 32700, m1: t >= 500 && t < 6000 }));
+    assert.deepStrictEqual(x.r, { ok: true, hall: { slv: 33100, shv: 32700 }, how: 'button' });
+}))
+.then(() => test('Take from M1: M2 pressed, a seat switch after M1, or nothing seen: nothing is taken', async () => {
+    let x = await watchScene((t) => ({ slv: lerp(t, 1000, 3000, 33000, 32700), shv: 32800, m2: t >= 800 && t < 1500 }));
+    assert.deepStrictEqual(x.r, { ok: false, why: 'm2' });
+    x = await watchScene((t) => ({ slv: lerp(t, 1000, 3000, 33000, 33200), shv: 32800, m1: t >= 800 && t < 1500, sw: t >= 2000 && t < 2600 }));
+    assert.deepStrictEqual(x.r, { ok: false, why: 'switch' });
+    // the buttons readable, M1 never seen: a seat moving by itself is not taken (M2 moves it as well)
+    x = await watchScene((t) => ({ slv: lerp(t, 1000, 3000, 33000, 33200), shv: 32800 }));
+    assert.deepStrictEqual(x.r, { ok: false, why: 'timeout' });
+    assert.ok(x.t >= L.WATCH_MS);
+}))
+.then(() => test('Take from M1: a module that does not show its buttons: the seat moving by itself, no switch held', async () => {
+    let x = await watchScene((t) => ({ slv: lerp(t, 1000, 3000, 33000, 33200), shv: lerp(t, 1000, 3000, 32800, 32900), buttons: 'none' }));
+    assert.deepStrictEqual(x.r, { ok: true, hall: { slv: 33200, shv: 32900 }, how: 'moved' });
+    assert.strictEqual(x.diag.sent.filter((q) => q.data[1] === 0x0C).length, 1, 'the buttons asked once, then left alone');
+    x = await watchScene((t) => ({ slv: lerp(t, 1000, 3000, 33000, 33200), shv: 32800, buttons: 'nrc' }));
+    assert.strictEqual(x.r.ok && x.r.how, 'moved', 'D70C refused: the same');
+    // moved with the seat's own switch: the person, not the memory
+    x = await watchScene((t) => ({ slv: lerp(t, 1000, 3000, 33000, 33200), shv: 32800, buttons: 'none', sw: t >= 900 && t < 3000 }));
+    assert.deepStrictEqual(x.r, { ok: false, why: 'timeout' });
+}))
+.then(() => test('Take from M1: gives way to a seat move, can be cancelled, and holds the probe meanwhile', async () => {
+    let x = await watchScene(() => ({ slv: 33000, shv: 32800 }), () => ({ stopIf: () => true }));
+    assert.deepStrictEqual(x.r, { ok: false, why: 'stopped' });
+    let probe = null, sawBusy = null;
+    x = await watchScene((t) => {
+        if (t >= 1000 && probe && sawBusy === null) { sawBusy = probe.busy; probe.cancelWatch(); }
+        return { slv: 33000, shv: 32800 };
+    }, (p) => { probe = p; return {}; });
+    assert.deepStrictEqual(x.r, { ok: false, why: 'cancelled' });
+    assert.strictEqual(sawBusy, true, 'busy while it watches: the background read and the polls wait');
+    x = await watchScene(() => ({ slv: 33000, shv: 32800 }), (p) => { p.seat.link.available = false; return {}; });
+    assert.deepStrictEqual(x.r, { ok: false, why: 'unread' });
+    assert.strictEqual(x.diag.sent.length, 0);
 }))
 .then(() => test('the file sends no write, actuator, routine or session request', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_link.js'), 'utf8');

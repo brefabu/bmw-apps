@@ -128,9 +128,17 @@ class Positions {
         try { this.data = Object.assign(this.data, JSON.parse(fs.readFileSync(this.file, 'utf8'))); } catch (e) { /* first start */ }
     }
     get(seat, name) { return this.data[seat] ? this.data[seat][name] : null; }
+    /**
+     * pos: { fore, height, back } as fractions; with the real seat also counts: { slv, shv } (the module's own
+     * counters: the move goes back to exactly those) and from: 'm1' (taken from the seat's memory M1) | 'now'.
+     */
     set(seat, name, pos) {
         if (!this.data[seat]) this.data[seat] = {};
-        this.data[seat][name] = { fore: pos.fore, height: pos.height, back: pos.back };
+        const keep = { fore: pos.fore, height: pos.height, back: pos.back };
+        const c = pos.counts, num = (v) => typeof v === 'number' && isFinite(v);
+        if (c && num(c.slv) && num(c.shv)) keep.counts = { slv: c.slv, shv: c.shv };
+        if (pos.from === 'm1' || pos.from === 'now') keep.from = pos.from;
+        this.data[seat][name] = keep;
         this._write();
     }
     /** A yes / no kept with the positions (the driver's seat let out, waiting for the car to start). */
@@ -301,22 +309,29 @@ class EasyEntry {
     }
     /**
      * Position 1: the seat as it is now (a fresh read first), where it comes back to when the car starts - in
-     * place of where it was when the car was switched off. Resolves true when saved.
+     * place of where it was when the car was switched off. from 'm1': the seat was just put there by its own memory
+     * M1 (main.js, SeatProbe.watchM1). Resolves true when saved.
      */
-    savePosition() {
+    savePosition(from) {
         return withTimeout(this.backend.refresh ? this.backend.refresh() : null, REFRESH_MS).then(() => {
             const now = this.backend.status().seats.driver.pos;
             if (!isFinite(now.fore) || !isFinite(now.height) || now.fore === null || now.height === null) {
                 this.note('ee.noPosition');
                 return false;
             }
-            this.positions.set(this._key(), 'mem1', now);
-            this.note('ee.saved');
+            const m1 = from === 'm1';
+            this.positions.set(this._key(), 'mem1', Object.assign({}, now, { from: m1 ? 'm1' : 'now' }));
+            this.note(m1 ? 'ee.savedM1' : 'ee.saved');
             return true;
         });
     }
     /** Position 1 saved. */
     hasPosition() { return !!this.positions.get(this._key(), 'mem1'); }
+    /** Where position 1 came from: 'm1' (the seat's memory), 'now' (saved as it was), or null (none saved). */
+    positionFrom() {
+        const p = this.positions.get(this._key(), 'mem1');
+        return p ? (p.from === 'm1' ? 'm1' : 'now') : null;
+    }
     goIn() {
         // position 1 when saved, else where the seat was when the car was switched off
         const key = this._key();

@@ -575,7 +575,9 @@ class RealBackend {
     /** Where the driver's seat is, from the last position read (null where unknown). */
     status() {
         const p = this.probe, h = p.hall || {};
-        const driver = { pos: { fore: p.fraction('slv', h.slv), height: p.fraction('shv', h.shv), back: null },
+        // the module's own counters with the shares: a position saved from here is gone back to exactly
+        const counts = typeof h.slv === 'number' && typeof h.shv === 'number' ? { slv: h.slv, shv: h.shv } : null;
+        const driver = { pos: { fore: p.fraction('slv', h.slv), height: p.fraction('shv', h.shv), back: null, counts: counts },
             moving: this.mover.busy, job: this.mover.busy ? 'goTo' : null };
         return { mode: this.mode, connected: p.state === 'found',
             seats: { driver: driver, passenger: { pos: { fore: null, height: null, back: null }, moving: false, job: null } } };
@@ -583,7 +585,8 @@ class RealBackend {
 
     /**
      * The driver's seat to target (fractions; back is not moved). Fore / aft back first, then height.
-     * opts.coarse: close enough is there (getting out).
+     * target.counts ({ slv, shv }, a saved position's): exactly those counters, kept within the measured ends -
+     * a share would shift with the ends measured later. opts.coarse: close enough is there (getting out).
      */
     async goTo(seat, target, opts) {
         if (seat !== 'driver') return false;
@@ -591,8 +594,13 @@ class RealBackend {
         if (!this.probe.hall) await this.probe.tick();
         const now = this.status().seats.driver.pos;
         if (now.fore === null || now.height === null) { this.log.warn('seat: no position or direction yet (Seat module)'); return false; }
-        const fore = target.fore === undefined || target.fore === null ? null : this.probe.countFor('slv', target.fore);
-        const height = target.height === undefined || target.height === null ? null : this.probe.countFor('shv', target.height);
+        const count = (a, f) => {
+            if (f === undefined || f === null) return null;
+            const c = target.counts && target.counts[a], r = this.probe.travel[a];
+            if (typeof c === 'number' && isFinite(c) && r) return Math.max(r[0], Math.min(r[1], Math.round(c)));
+            return this.probe.countFor(a, f);
+        };
+        const fore = count('slv', target.fore), height = count('shv', target.height);
         const steps = [];
         // going back (getting out): back first, then down; coming forward (getting in): up first, then forward
         const back = target.fore !== null && target.fore !== undefined && target.fore >= now.fore;

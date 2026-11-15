@@ -281,6 +281,22 @@ drawPage(true, D0);
 delete app.seats.progress;
 app.easyEntry.state = 'IDLE';
 delete app.seats.reason;
+// armed: position 1 from the seat's memory M1 - a press starts watching, a second press saves the seat as it is
+let m1State = null, m1Runs = 0, m1Saves = 0;
+app.seatM1 = { run() { m1Runs++; m1State = { seen: false, moved: false, buttons: null }; }, saveNow() { m1Saves++; m1State = null; },
+    state: () => m1State };
+drawPage(true, D0, 'seat-save');
+assert.strictEqual(m1Runs, 1, 'armed: Position 1 from M1 starts the watch');
+[{ seen: false, moved: false, buttons: null }, { seen: true, moved: false, buttons: true },
+    { seen: false, moved: false, buttons: false }, { seen: false, moved: true, buttons: false }].forEach((w) => { m1State = w; drawPage(true, D0); });
+drawPage(true, D0, 'seat-save');
+assert.strictEqual(m1Saves, 1, 'pressed again while watching: saved as it is');
+['ee.savedM1', 'ee.m1Other', 'ee.m1Switch', 'ee.m1NotSeen', 'ee.m1Stopped', 'ee.m1Unread'].forEach((k) => { app.easyEntry.note(k); drawPage(true, D0); });
+text.setLanguage('ro');
+m1State = { seen: true, moved: false, buttons: true }; drawPage(true, D0);
+m1State = null; app.easyEntry.note('ee.m1NotSeen'); drawPage(true, D0);
+text.setLanguage('en');
+delete app.seatM1;
 home.ui.view = 'main';
 assert.ok(drawPage(true, D0).targets.indexOf('main-seat') >= 0);
 home.ui.view = 'seat';

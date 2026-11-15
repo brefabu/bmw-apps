@@ -514,6 +514,28 @@ Promise.resolve()
     assert.strictEqual(new S.Positions(dir, quiet).flag('driver.real', 'out'), false, 'back in: not OUT after a restart');
     onlyAllowed(mod);
 }))
+.then(() => test('position 1 from M1: kept as the module counters, and gone back to exactly when the ends measured change', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bre-drive-'));
+    const mod = fakeModule({ slv: 33100, shv: 32900 });
+    const r = rig(mod);
+    await r.probe.tick();
+    const ee = new S.EasyEntry(r.backend, new S.Positions(dir, quiet), quiet);
+    assert.strictEqual(await ee.savePosition('m1'), true);
+    const kept = new S.Positions(dir, quiet).get('driver.real', 'mem1');
+    assert.deepStrictEqual(kept.counts, { slv: 33100, shv: 32900 });
+    assert.strictEqual(kept.from, 'm1');
+    // the rail's back end seen 100 counts further later: the same share is now 32 counts off; the counters are not
+    r.probe.travel.slv[0] -= 100;
+    mod.slv = 32700; mod.shv = 32473;
+    await r.probe.tick();
+    assert.strictEqual(await r.backend.goTo('driver', kept), true, r.mover.reason);
+    assert.ok(near(mod.slv, 33100, Drv.TOLERANCE) && near(mod.shv, 32900, Drv.TOLERANCE), mod.slv + ' ' + mod.shv);
+    // counters outside the ends measured: kept within them
+    mod.slv = 32700; await r.probe.tick();
+    assert.strictEqual(await r.backend.goTo('driver', { fore: 0, height: kept.height, counts: { slv: 40000, shv: 32900 } }), true, r.mover.reason);
+    assert.ok(mod.slv <= 33321 + Drv.TOLERANCE, 'not past the front end measured: ' + mod.slv);
+    onlyAllowed(mod);
+}))
 .then(() => test('the file writes only D708, for fore / aft and height', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps', 'bre_hub', 'seat_drive.js'), 'utf8')
         .replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
