@@ -207,7 +207,7 @@ Promise.resolve()
     assert.strictEqual(probe.risesToward('slv'), null);
     assert.strictEqual(probe.percent('slv'), null);
 }))
-.then(() => test('a position read that fails: tried again in the same poll; then the last one stands a while, with why', async () => {
+.then(() => test('a position read that fails: tried again in the same poll; the last one is kept, with why', async () => {
     let fails = 1;
     const table = { 0xD700: CONFIG, 0xD704: INIT, 0xD708: MOTOR_OFF, 0xD712: SW_NONE,
         0xD702: () => (fails-- > 0 ? null : hall(33068, 32523)) };
@@ -219,9 +219,10 @@ Promise.resolve()
     await probe.tick();
     assert.strictEqual(probe.hallError, 'timeout', 'why is kept for the page');
     assert.deepStrictEqual(probe.hall, { slv: 33068, shv: 32523, lnv: null }, 'the last position stands a while');
-    probe.hallAt -= 6000;                                             // ... but not for long
+    probe.hallAt -= 60000;                                            // ... and stays, however old (moves start from it)
     await probe.tick();
-    assert.strictEqual(probe.hall, null);
+    assert.deepStrictEqual(probe.hall, { slv: 33068, shv: 32523, lnv: null }, 'the last position is kept');
+    assert.ok(!probe.fresh(5000), 'but it is not fresh');
     table[0xD702] = hall(33000, 32600);
     await probe.tick();
     assert.strictEqual(probe.hallError, null);

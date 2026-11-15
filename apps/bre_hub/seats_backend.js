@@ -280,9 +280,11 @@ class EasyEntry {
     }
     goOut() {
         this.state = 'MOVING_OUT'; this.note('ee.movingOut');
-        // a fresh position first (the real seat: read from its module, at most REFRESH_MS), then where the seat is
-        // now is the driving position to come back to
-        return withTimeout(this.backend.refresh ? this.backend.refresh() : null, REFRESH_MS).then(() => {
+        // where the seat is: the last position read (the real seat's background watch keeps it fresh); read first only
+        // when none is known (at most REFRESH_MS). It is the driving position to come back to.
+        const known = this.backend.status().seats.driver.pos;
+        const ok = isFinite(known.fore) && isFinite(known.height) && known.fore !== null && known.height !== null;
+        return withTimeout(ok || !this.backend.refresh ? null : this.backend.refresh(), REFRESH_MS).then(() => {
             if (this.state !== 'MOVING_OUT') return null;
             const now = this.backend.status().seats.driver.pos;
             if (!isFinite(now.fore) || !isFinite(now.height) || now.fore === null || now.height === null) {

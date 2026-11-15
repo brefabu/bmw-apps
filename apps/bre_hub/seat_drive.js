@@ -39,10 +39,10 @@ const NEAR = 25;                // counts: a seat that stopped moving this close
                                 // a few counts short of a target at the end of the travel - fully down)
 const FIRST_SHARE = 0.92;       // the first pulse aims at this share of the way: short rather than past (a precise
                                 // move; a coarse one - getting out - aims at the whole way)
+const TOWARD_FRESH_MS = 3000;   // a precise move (getting in, toward the wheel) starts from a position this recent only
 const COARSE_TOL = 25;          // counts (~1 cm): close enough for a coarse move (the exit position need not be exact)
 const END_EXTRA = 1.15;         // a target at the end of the travel (fully down): the pulse that long longer - the
                                 // seat's own end stop ends it, the "short of the target" of an end stop is avoided
-const FRESH_MS = 1500;          // a position read this recently (the probe's) starts a move without another read
 const MAX_PULSES = 4;           // per axis and move
 const MIN_PULSE_MS = 120;       // a motor needs about this long to move at all
 const MAX_PULSE_MS = 8000;      // no pulse runs longer (the whole travel takes ~10 s)
@@ -225,8 +225,16 @@ class SeatMover {
     }
 
     /**
-     * One axis to a counter, by timed pulses. opts.coarse: within COARSE_TOL is there and the first pulse aims at the
-     * whole way (getting out). Resolves true at the target, false otherwise (this.reason says why).
+     * One axis to a counter, by timed pulses (Fabian, 15.11.2026): from the LAST position read (any age: the
+     * background watch keeps it fresh while the car runs; read first only when there is none), a pulse worked out by
+     * the speed, then the position read to check, and corrected.
+     * opts.coarse (getting out): within COARSE_TOL is there, the first pulse aims at the whole way, and the move is
+     * ONE WAY - corrections only go on the way the first pulse went (back / down), never toward the wheel or up:
+     * past the target is accepted. And a check that cannot be read counts as there, its position worked out from the
+     * speed (the next move checks it).
+     * A precise move (getting in) starts from the last position only when it is under TOWARD_FRESH_MS old, else it
+     * reads first: it goes toward the wheel, and a seat moved since the last read would be pushed past its target.
+     * Resolves true at the target, false otherwise (this.reason says why).
      */
     async moveAxis(axis, target, opts) {
         if (!this._actionFor(axis, true)) { this.reason = 'direction not learned'; return false; }
@@ -234,17 +242,22 @@ class SeatMover {
         const coarse = !!(opts && opts.coarse), tol = coarse ? COARSE_TOL : TOLERANCE;
         const ends = this.probe.travel && this.probe.travel[axis];
         const toEnd = !!(ends && (target <= ends[0] + 2 || target >= ends[1] - 2));
-        // a position just read (the background watch, Easy Access's refresh) saves a read before the first pulse
-        const first = (this.probe.fresh && this.probe.fresh(FRESH_MS)) || await this._settled();
+        // getting out (one way, back / down): the last position read, whatever its age. Toward the wheel (getting in)
+        // only a recent one (the background watch): a seat moved since - the M1 button pressed after getting in -
+        // would otherwise be pushed toward the wheel by the whole distance; else one read first
+        const first = (coarse ? this.probe.hall : this.probe.fresh && this.probe.fresh(TOWARD_FRESH_MS)) || await this._settled();
         let p = first && first[axis];
         if (p === null || p === undefined) { this.reason = 'position not read'; return false; }
         this.axis = axis;
         this.progress = { axis: axis, start: p, now: p, target: target, action: null, pulse: 0 };
-        this.log.info('seat: ' + axis + ' ' + p + ' -> ' + target);
+        this.log.info('seat: ' + axis + ' ' + p + ' -> ' + target + (coarse ? ' (coarse, one way)' : ''));
+        const firstUp = target > p;
         try {
             for (let i = 0; i < MAX_PULSES; i++) {
                 const d = target - p;
                 if (Math.abs(d) <= tol) return true;
+                // one way (getting out): past the target is there, nothing goes back toward the wheel or up
+                if (coarse && i > 0 && (d > 0) !== firstUp) return true;
                 const up = d > 0, action = this._actionFor(axis, up);
                 const v = this.probe.speed(axis, action);
                 if (!v) { this.reason = 'measure the seat speed first (Seat module)'; return false; }
@@ -256,7 +269,16 @@ class SeatMover {
                 if (r.why) { this.reason = r.why; return false; }
                 await this.wait(SETTLE_MS);
                 const h = await this._settled();
-                const q = h && h[axis];
+                let q = h && h[axis];
+                if ((q === null || q === undefined) && coarse) {
+                    // getting out, the check not read: the pulse ran its time - there, at the position the speed gives
+                    q = Math.round(p + (up ? 1 : -1) * v * r.ran);
+                    if (ends) q = Math.max(ends[0], Math.min(ends[1], q));
+                    const est = Object.assign({}, this.probe.hall || {}); est[axis] = q;
+                    if (this.probe.seen) this.probe.seen(est);
+                    this.log.warn('seat: ' + axis + ' check not read: taken as ' + q + ' from the speed');
+                    return true;
+                }
                 if (q === null || q === undefined) { this.reason = 'position not read'; return false; }
                 if (this.probe.seen) this.probe.seen(h);
                 this.progress.now = q;
@@ -391,8 +413,8 @@ class RealBackend {
      */
     async goTo(seat, target, opts) {
         if (seat !== 'driver') return false;
-        // a fresh position before working out the move (one just read, e.g. by Easy Access's refresh, will do)
-        if (!this.probe.hallAt || Date.now() - this.probe.hallAt > 1500) await this.probe.tick();
+        // the last position read, whatever its age (a read only when there is none)
+        if (!this.probe.hall) await this.probe.tick();
         const now = this.status().seats.driver.pos;
         if (now.fore === null || now.height === null) { this.log.warn('seat: no position or direction yet (Seat module)'); return false; }
         const fore = target.fore === undefined || target.fore === null ? null : this.probe.countFor('slv', target.fore);

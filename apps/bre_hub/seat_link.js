@@ -46,8 +46,6 @@ const AXES = Object.freeze({
 const MIN_TRAVEL = 500;          // counts between the ends seen before a position counts as a share of the travel
 const HALL_TRIES = 2;            // a position read that fails is tried again in the same poll (each try is itself
 const HALL_PAUSE_MS = 300;       // tried again while the transport says busy: more would only crowd it)
-const STALE_MS = 5000;           // the last position read stands this long when reads fail (the seat did not move:
-                                 // a move reads its own position before and while it runs)
 const MIN_STEP = 3;              // counts a poll must move for a direction sample
 const VOTES = 2;                 // agreeing samples (and twice the disagreeing ones) to learn a direction
 const HALL_MIN = 8192, HALL_MAX = 57344;
@@ -332,7 +330,7 @@ class SeatProbe {
         return this._tick;
     }
 
-    /** The position, tried HALL_TRIES times; a failure keeps the last one for STALE_MS. Resolves true when read. */
+    /** The position, tried HALL_TRIES times; a failure keeps the last one (moves start from it). Resolves true when read. */
     async _readHall() {
         let h = null;
         for (let i = 0; i < HALL_TRIES; i++) {
@@ -345,8 +343,7 @@ class SeatProbe {
             return true;
         }
         this.hallError = h.reason || 'not read';
-        if (Date.now() - this.hallAt > STALE_MS) this.hall = null;
-        return false;
+        return false;                                     // the last position stays (hallAt says how old it is)
     }
 
     async _poll() {

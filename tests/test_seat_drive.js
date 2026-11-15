@@ -212,6 +212,77 @@ Promise.resolve()
     assert.deepStrictEqual(sent.slice(0, 2), ['10', '2e'], 'the session, then the first pulse straight away');
     onlyAllowed(mod);
 }))
+.then(() => test('getting out from an old last position: it starts from it, without a read first', async () => {
+    const mod = fakeModule({ slv: 33100 });
+    const r = rig(mod);
+    await r.probe.tick();
+    r.probe.hallAt -= 120000;                                         // read two minutes ago
+    const before = mod.sent.length;
+    assert.strictEqual(await r.mover.run([['slv', 32801]], { coarse: true }), true, r.mover.reason);
+    const first = mod.sent.slice(before).filter((s) => s.sid !== 0x10)[0];
+    assert.strictEqual(first.sid, 0x2E, 'the first pulse before any read');
+    onlyAllowed(mod);
+}))
+.then(() => test('getting in (toward the wheel) from an old position: one read first', async () => {
+    const mod = fakeModule({ slv: 32801 });
+    const r = rig(mod);
+    await r.probe.tick();
+    r.probe.hallAt -= 10000;
+    const before = mod.sent.length;
+    assert.strictEqual(await r.mover.run([['slv', 33100]]), true, r.mover.reason);
+    const first = mod.sent.slice(before).filter((s) => s.sid !== 0x10)[0];
+    assert.deepStrictEqual([first.sid, first.data[1]], [0x22, 0x02], 'the position read before moving toward the wheel');
+    onlyAllowed(mod);
+}))
+.then(() => test('getting out from a stale position (the seat further back than read): back only, never toward the wheel', async () => {
+    const mod = fakeModule({ slv: 33100, shv: 32900 });
+    const r = rig(mod);
+    await r.probe.tick();                                             // read at 33100 ...
+    mod.slv = 32700;                                                  // ... then moved back by hand, unseen
+    assert.strictEqual(await r.mover.run([['slv', 32801]], { coarse: true }), true, r.mover.reason);
+    assert.ok(writes(mod).indexOf('slv plus') < 0, 'nothing toward the wheel: ' + writes(mod).join(', '));
+    assert.ok(mod.slv <= 32700, 'not forward of where it was: ' + mod.slv);
+    onlyAllowed(mod);
+}))
+.then(() => test('getting out, the check not read: taken as there, at the position the speed gives', async () => {
+    const mod = fakeModule({ slv: 33100 });
+    let pulses = 0;
+    const r = rig(mod);
+    await r.probe.tick();
+    const physical = mod.diag.physical;
+    mod.diag.physical = async function (target, sid, data) {
+        if (sid === 0x2E && data[3] !== 0) pulses++;
+        if (sid === 0x22 && data[1] === 0x02 && pulses > 0) return null;   // every check after the pulse goes unanswered
+        return physical.apply(this, arguments);
+    };
+    assert.strictEqual(await r.mover.run([['slv', 32801]], { coarse: true }), true, r.mover.reason);
+    assert.ok(near(r.probe.hall.slv, 32801, Drv.COARSE_TOL), 'the position worked out: ' + r.probe.hall.slv);
+    assert.ok(near(mod.slv, 32801, Drv.COARSE_TOL), 'and the seat is there: ' + mod.slv);
+    // a precise move does not guess: it stops
+    const mod2 = fakeModule({ slv: 32801 });
+    const r2 = rig(mod2);
+    await r2.probe.tick();
+    const physical2 = mod2.diag.physical; let p2 = 0;
+    mod2.diag.physical = async function (target, sid, data) {
+        if (sid === 0x2E && data[3] !== 0) p2++;
+        if (sid === 0x22 && data[1] === 0x02 && p2 > 0) return null;
+        return physical2.apply(this, arguments);
+    };
+    assert.strictEqual(await r2.mover.run([['slv', 33100]]), false);
+    assert.strictEqual(r2.mover.reason, 'position not read');
+}))
+.then(() => test('getting in after the seat was moved forward unseen (the M1 button): never pushed past the target', async () => {
+    const mod = fakeModule({ slv: 32801 });
+    let most = 0;
+    const r = rig(mod, { during: () => { most = Math.max(most, mod.slv); } });
+    await r.probe.tick();                                             // read at 32801 (getting out) ...
+    r.probe.hallAt -= 30000;
+    mod.slv = 33050;                                                  // ... then M1 brought it forward, unseen
+    assert.strictEqual(await r.mover.run([['slv', 33100]]), true, r.mover.reason);
+    assert.ok(near(mod.slv, 33100, Drv.TOLERANCE), String(mod.slv));
+    assert.ok(most <= 33100 + Drv.TOLERANCE, 'never past the driving position toward the wheel: ' + Math.round(most));
+    onlyAllowed(mod);
+}))
 .then(() => test('the background watch reads only the position: one request', async () => {
     const mod = fakeModule({ slv: 33000 });
     const r = rig(mod);

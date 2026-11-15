@@ -67,7 +67,7 @@ mgu.run({
         const realSeats = new RealBackend({ probe: seatProbe, mover: mover, log: log });
         // a fresh position, patiently: right after the car is switched off the link is often busy (G30, 15.11.2026)
         realSeats.refresh = async () => {
-            if (seatProbe.fresh(5000)) return;            // the background watch read it just now: move at once
+            if (seatProbe.fresh(1000)) return;            // read just now
             const asked = Date.now();
             for (;;) {
                 await seatProbe.tick();
